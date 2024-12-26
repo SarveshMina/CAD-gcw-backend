@@ -1,0 +1,10 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "",
+    "CosmosDbConnectionString": "AccountEndpoint=https://calendar-cosmos-db.documents.azure.com:443/;AccountKey=Uv0TrEiTbKnKqyAFMNev16hSAzJjaqcctz6pQ229Bfh4rInuqi15EEG4FmweW1T7uMyGlRr1EhtRACDbOvR0cA==;",
+    "DatabaseName" : "CalendarAppDB",
+    "UsersContainer" : "UsersContainer",
+    "FUNCTIONS_WORKER_RUNTIME": "python"
+  }
+}
