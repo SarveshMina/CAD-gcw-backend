@@ -1,23 +1,18 @@
 # app/user_routes.py
 
 import logging
-from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 import bcrypt
+from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
 
-from app.database import user_container
+from app.database import user_container, calendars_container
+from app.models import User, Calendar
 from app.models import User
 
-# Create a module-level logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# Register a new user
 def register_user(user_data: User):
-    """
-    Registers a new user with validation:
-    - Username must be unique, 5..15 chars
-    - Password must be 8..15 chars
-    """
-
     logger.info("Received request to register user: %s", user_data.username)
 
     # Validate username length (5..15)
@@ -48,33 +43,45 @@ def register_user(user_data: User):
     )
     user_data.password = hashed_password.decode("utf-8")
 
-    # Create user record in Cosmos DB
+    # Create the user record in Cosmos DB
     try:
-        # Fix for Cosmos DB: set the "id" field so that Cosmos doesn't error
-        item_dict = user_data.dict()
-        item_dict["id"] = user_data.userId
+        user_item = user_data.dict()
+        user_item["id"] = user_data.userId  # Cosmos DB 'id' fix
+        user_container.create_item(user_item)
 
-        logger.debug("Creating user item in Cosmos DB: %s", item_dict)
-        user_container.create_item(item_dict)
+        # Create home calendar for this user
+        home_cal = Calendar(
+            name=f"{user_data.username}'s Home Calendar",
+            ownerId=user_data.userId,
+            isGroup=False,
+            members=[user_data.userId]
+        )
+        cal_item = home_cal.dict()
+        cal_item["id"] = home_cal.calendarId  # 'id' fix for Cosmos
+        calendars_container.create_item(cal_item)
 
-        logger.info("User '%s' created successfully", user_data.username)
-        return {"message": "User registered successfully", "userId": user_data.userId}, 201
+        # Update the user's calendars list
+        user_data.calendars.append(home_cal.calendarId)
+        user_container.upsert_item(user_data.dict())  # or replace_item if needed
 
+        logger.info("User '%s' created successfully with home calendar '%s'",
+                    user_data.username, home_cal.calendarId)
+        return {"message": "User registered successfully", # Return user ID and calendar ID
+                "userId": user_data.userId,
+                "homeCalendarId": home_cal.calendarId}, 201
+    
+    # Handle exceptions
     except CosmosResourceExistsError:
         logger.exception("User resource conflict in DB for '%s'", user_data.username)
         return {"error": "User already exists"}, 400
-    except CosmosHttpResponseError as e:
+    except CosmosHttpResponseError as e: # Cosmos DB HTTP error
         logger.exception("Cosmos HTTP error for '%s': %s", user_data.username, str(e))
         return {"error": str(e)}, 500
 
-
+# Login a user
 def login_user(username: str, password: str):
-    """
-    Logs a user in using username/password. Checks bcrypt hashed password.
-    """
-
     logger.info("Received login request for username: %s", username)
-
+    # Find the user in Cosmos DB
     user_query = list(
         user_container.query_items(
             query="SELECT * FROM Users u WHERE u.username = @username",
@@ -82,16 +89,18 @@ def login_user(username: str, password: str):
             enable_cross_partition_query=True
         )
     )
-
+    # Check if user exists
     if not user_query:
         logger.warning("Login failed: user '%s' not found", username)
         return {"error": "User not found"}, 404
-
+    
+    # Get the user record
     user = user_query[0]
 
+    # Check the password
     if bcrypt.checkpw(password.encode("utf-8"), user["password"].encode("utf-8")):
         logger.info("User '%s' logged in successfully", username)
         return {"message": "Login successful", "userId": user["userId"]}, 200
-    else:
+    else: # Invalid password
         logger.warning("Invalid credentials for user '%s'", username)
         return {"error": "Invalid credentials"}, 401
