@@ -22,12 +22,14 @@ class TestCalendar(unittest.TestCase):
     def setUpClass(cls):
         """
         Runs once before all tests in this class.
-        We create a user and store the homeCalendarId for event tests.
+        We create a user and store the homeCalendarId for event tests,
+        and also capture the userId to use as creatorId.
         """
         cls.register_url = f"{AZURE_FUNC_URL}register"
         cls.calendar_id = None
+        cls.user_id = None
         cls.test_user = {
-            "username": "calendarTest2",
+            "username": "calendarTest",
             "password": "CalendarPass1",
             "email": "calendar@example.com"
         }
@@ -42,10 +44,12 @@ class TestCalendar(unittest.TestCase):
             # Successful creation
             json_body = response.json()
             cls.calendar_id = json_body.get("homeCalendarId")
+            cls.user_id = json_body.get("userId")  # Capture userId for creatorId
             logging.info("Created user. Home calendar = %s", cls.calendar_id)
         elif response.status_code == 400 and "Username already exists" in response.text:
             logging.info("User already exists, proceeding to fetch their home calendar.")
-            # If you need to fetch an existing homeCalendarId, do so here.
+            # If you want to retrieve userId/homeCalendar from DB or separate call, do it here.
+            # For now, we'll assume we have no need to do that.
         else:
             logging.warning(
                 "Unexpected response creating test user: %d %s",
@@ -55,7 +59,8 @@ class TestCalendar(unittest.TestCase):
 
     def setUp(self):
         """
-        Runs before each individual test. We build the event endpoints using self.calendar_id.
+        Runs before each individual test.
+        Build the event endpoints using cls.calendar_id.
         """
         self.event_base_url = None
         self.events_list_url = None
@@ -69,16 +74,18 @@ class TestCalendar(unittest.TestCase):
 
     def test_01_create_event_success(self):
         """
-        Create an event in the user's home calendar.
+        Create an event in the user's home calendar with a creatorId.
         """
         if not self.calendar_id:
             self.skipTest("No home calendar available for testing (registration may have failed).")
 
+        # We'll use the userId from setUpClass as the event's creator.
         start_time = datetime.utcnow() + timedelta(days=1)
         end_time = start_time + timedelta(hours=2)
 
         payload = {
             "calendarId": self.calendar_id,
+            "creatorId": self.user_id,  # <-- We include creatorId here
             "title": "Movie Booking",
             "startTime": start_time.isoformat(),
             "endTime": end_time.isoformat(),
@@ -111,7 +118,7 @@ class TestCalendar(unittest.TestCase):
 
     def test_03_create_event_missing_title(self):
         """
-        Attempt to create an event without a title, but still with calendarId.
+        Attempt to create an event without a title, but with creatorId.
         Expect a failure from the server (because 'title' is required).
         """
         if not self.calendar_id:
@@ -119,6 +126,7 @@ class TestCalendar(unittest.TestCase):
 
         payload = {
             "calendarId": self.calendar_id,
+            "creatorId": self.user_id,  # We still supply creatorId
             "startTime": (datetime.utcnow() + timedelta(days=1)).isoformat(),
             "endTime": (datetime.utcnow() + timedelta(days=1, hours=1)).isoformat(),
             "locked": True
@@ -126,12 +134,14 @@ class TestCalendar(unittest.TestCase):
         response = requests.post(self.event_base_url, json=payload)
         self.log_request_response(payload, response)
 
+        # We do NOT expect success (201).
         self.assertNotEqual(
             response.status_code, 
             201, 
             "Expected to fail due to missing title, but got success."
         )
-        self.assertTrue(response.status_code in [400, 422, 500])
+        # Typically 422 if pydantic validation fails, or 400, or 500 depending on your code.
+        self.assertIn(response.status_code, [400, 422, 500])
 
     def log_request_response(self, payload, response):
         """

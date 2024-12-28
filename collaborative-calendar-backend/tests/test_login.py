@@ -23,7 +23,7 @@ class TestLoginUser(unittest.TestCase):
         self.register_url = f"{AZURE_FUNC_URL}register"
         logging.info("Testing login endpoint: %s", self.base_url)
         self.test_user = {
-            "username": "loginUserTest",
+            "username": "loginTest",
             "password": "LoginPass123",
             "email": "login@example.com"
         }
