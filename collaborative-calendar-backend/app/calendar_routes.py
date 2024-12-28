@@ -47,3 +47,21 @@ def add_event(calendar_id: str, event_data: dict):
     except Exception as e:
         logger.exception("Error creating event in calendar %s: %s", calendar_id, str(e))
         return {"error": str(e)}, 500
+
+def get_events(calendar_id: str):
+    """
+    Retrieves all events for a given calendar.
+    """
+    logger.info("Fetching events for calendar %s", calendar_id)
+    try:
+        # Query events by partition key = calendar_id
+        events_query = list(events_container.query_items(
+            query="SELECT * FROM Events e WHERE e.calendarId = @calId",
+            parameters=[{"name": "@calId", "value": calendar_id}],
+            enable_cross_partition_query=True
+        ))
+        return {"events": events_query}, 200
+
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching events for calendar %s: %s", calendar_id, str(e))
+        return {"error": str(e)}, 500
