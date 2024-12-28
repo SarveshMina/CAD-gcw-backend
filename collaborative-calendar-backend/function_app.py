@@ -1,5 +1,3 @@
-# function_app.py
-
 import azure.functions as func
 from app.main import register, login, create_event, list_events
 
@@ -13,11 +11,14 @@ def register_function(req: func.HttpRequest) -> func.HttpResponse:
 def login_function(req: func.HttpRequest) -> func.HttpResponse:
     return login(req)
 
-# New endpoints
+# Instead of doing 'def create_event_function(req, calendarId: str)', 
+# retrieve 'calendarId' from req.route_params inside the function
 @app.route(route="calendar/{calendarId}/event", methods=["POST"])
-def create_event_function(req: func.HttpRequest, calendarId: str) -> func.HttpResponse:
-    return create_event(req, calendarId)
+def create_event_function(req: func.HttpRequest) -> func.HttpResponse:
+    calendar_id = req.route_params.get('calendarId')
+    return create_event(req, calendar_id)
 
 @app.route(route="calendar/{calendarId}/events", methods=["GET"])
-def list_events_function(req: func.HttpRequest, calendarId: str) -> func.HttpResponse:
-    return list_events(req, calendarId)
+def list_events_function(req: func.HttpRequest) -> func.HttpResponse:
+    calendar_id = req.route_params.get('calendarId')
+    return list_events(req, calendar_id)

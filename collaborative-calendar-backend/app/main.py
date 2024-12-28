@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def register(req: HttpRequest) -> HttpResponse:
-    logger.info("Register endpoint hit")
     try:
         req_body = req.get_json()
         user = User(**req_body)
@@ -23,7 +22,6 @@ def register(req: HttpRequest) -> HttpResponse:
         return HttpResponse(str(e), status_code=500)
 
 def login(req: HttpRequest) -> HttpResponse:
-    logger.info("Login endpoint hit")
     try:
         req_body = req.get_json()
         username = req_body.get("username")
@@ -38,21 +36,25 @@ def login(req: HttpRequest) -> HttpResponse:
         logger.exception("Error in login endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
 
-def create_event(req: HttpRequest, calendarId: str) -> HttpResponse:
-    logger.info("Create event endpoint hit for calendar %s", calendarId)
+def create_event(req: HttpRequest, calendar_id: str) -> HttpResponse:
+    """
+    The actual handler for creating an event, invoked by create_event_function in function_app.py
+    """
     try:
         event_data = req.get_json()
-        response, status_code = add_event(calendarId, event_data)
+        response, status_code = add_event(calendar_id, event_data)
         return HttpResponse(json.dumps(response), status_code=status_code)
     except Exception as e:
-        logger.exception("Error in create_event endpoint: %s", str(e))
+        logger.exception("Error in create_event: %s", str(e))
         return HttpResponse(str(e), status_code=500)
 
-def list_events(req: HttpRequest, calendarId: str) -> HttpResponse:
-    logger.info("List events endpoint hit for calendar %s", calendarId)
+def list_events(req: HttpRequest, calendar_id: str) -> HttpResponse:
+    """
+    The actual handler for listing events, invoked by list_events_function in function_app.py
+    """
     try:
-        response, status_code = get_events(calendarId)
+        response, status_code = get_events(calendar_id)
         return HttpResponse(json.dumps(response), status_code=status_code)
     except Exception as e:
-        logger.exception("Error in list_events endpoint: %s", str(e))
+        logger.exception("Error in list_events: %s", str(e))
         return HttpResponse(str(e), status_code=500)

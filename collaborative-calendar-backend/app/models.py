@@ -6,17 +6,17 @@ import uuid
 from datetime import datetime
 
 # -----------------------
-# Existing User Model
+# User Model
 # -----------------------
 class User(BaseModel):
-    username: str
-    password: str
-    email: Optional[str] = None
-    userId: str = str(uuid.uuid4())
+    username: str # e.g., "johndoe"
+    password: str # hashed password
+    email: Optional[str] = None # optional field
+    userId: str = str(uuid.uuid4()) # unique identifier for the user
     calendars: List[str] = []  # store calendarIds the user has
 
 # -----------------------
-# New Calendar Model
+# Calendar Model
 # -----------------------
 class Calendar(BaseModel):
     calendarId: str = str(uuid.uuid4())
@@ -26,13 +26,21 @@ class Calendar(BaseModel):
     members: List[str] = []  # for group calendars, store member userIds
 
 # -----------------------
-# New Event Model
+# Event Model
 # -----------------------
 class Event(BaseModel):
     eventId: str = str(uuid.uuid4())
     calendarId: str  # which calendar this event belongs to
-    title: str
-    startTime: datetime
-    endTime: datetime
+    title: str # e.g., "Meeting with John"
+    startTime: datetime # e.g., 2021-08-01T09:00:00
+    endTime: datetime # e.g., 2021-08-01T10:00:00
     locked: bool = True  # personal events are locked by default
-    description: Optional[str] = None
+    description: Optional[str] = None # e.g., "Discuss project timelines"
+
+
+class Config:
+    # Not strictly required, but helpful if you do new_event.json()
+    # This instructs Pydantic how to encode datetimes
+    json_encoders = {
+        datetime: lambda dt: dt.isoformat()
+    }
