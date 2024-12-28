@@ -5,6 +5,7 @@ import json
 import logging
 
 from app.user_routes import register_user, login_user
+from app.calendar_routes import add_event, get_events
 from app.models import User
 
 logger = logging.getLogger(__name__)
@@ -35,4 +36,23 @@ def login(req: HttpRequest) -> HttpResponse:
         return HttpResponse(json.dumps(response), status_code=status_code)
     except Exception as e:
         logger.exception("Error in login endpoint: %s", str(e))
+        return HttpResponse(str(e), status_code=500)
+
+def create_event(req: HttpRequest, calendarId: str) -> HttpResponse:
+    logger.info("Create event endpoint hit for calendar %s", calendarId)
+    try:
+        event_data = req.get_json()
+        response, status_code = add_event(calendarId, event_data)
+        return HttpResponse(json.dumps(response), status_code=status_code)
+    except Exception as e:
+        logger.exception("Error in create_event endpoint: %s", str(e))
+        return HttpResponse(str(e), status_code=500)
+
+def list_events(req: HttpRequest, calendarId: str) -> HttpResponse:
+    logger.info("List events endpoint hit for calendar %s", calendarId)
+    try:
+        response, status_code = get_events(calendarId)
+        return HttpResponse(json.dumps(response), status_code=status_code)
+    except Exception as e:
+        logger.exception("Error in list_events endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
