@@ -1,6 +1,7 @@
 # app/calendar_routes.py
 
 import logging
+import json
 from datetime import datetime
 from pydantic import ValidationError
 from azure.cosmos.exceptions import CosmosHttpResponseError
@@ -11,33 +12,145 @@ from app.models import Event, Calendar
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def add_event(calendar_id: str, event_data: dict):
-    logger.info("Adding event to calendar %s", calendar_id)
+
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+def create_personal_calendar(user_id: str, name: str):
+    """
+    create_personal_calendar:
+    Creates a new calendar with isGroup=False and isDefault=False.
+    Associates the calendar with the user by setting ownerId and including the user in members.
+    """
+    logger.info("Creating personal calendar '%s' for user '%s'", name, user_id)
+
+    # Create the Calendar model
+    personal_cal = Calendar(
+        name=name,
+        ownerId=user_id,
+        isGroup=False,
+        isDefault=False,  # Not a default calendar
+        members=[user_id]
+    )
+    cal_item = personal_cal.dict()
+    cal_item["id"] = personal_cal.calendarId  # Cosmos 'id' fix
+
+    try:
+        calendars_container.create_item(cal_item)
+        logger.info("Personal calendar '%s' created with ID '%s'", name, personal_cal.calendarId)
+        return {
+            "message": "Personal calendar created successfully",
+            "calendarId": personal_cal.calendarId
+        }, 201
+    except CosmosHttpResponseError as e:
+        logger.exception("Error creating personal calendar: %s", str(e))
+        return {"error": str(e)}, 500
+
+def delete_personal_calendar(user_id: str, calendar_id: str):
+    """
+    delete_personal_calendar:
+    Verifies that the calendar exists and that the requesting user is the owner.
+    Prevents deletion if the calendar is marked as isDefault=True.
+    Deletes all events associated with the calendar before deleting the calendar itself.
+    """
+    logger.info("User '%s' attempting to delete calendar '%s'", user_id, calendar_id)
+
+    # 1) Fetch the calendar doc
+    try:
+        cal_query = list(calendars_container.query_items(
+            query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
+            parameters=[{"name": "@calId", "value": calendar_id}],
+            enable_cross_partition_query=True
+        ))
+        if not cal_query:
+            return {"error": "Calendar not found"}, 404
+
+        cal_doc = cal_query[0]
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching calendar '%s': %s", calendar_id, str(e))
+        return {"error": str(e)}, 500
+
+    # 2) Check if the user is the owner
+    if cal_doc.get("ownerId") != user_id:
+        return {"error": "Only the calendar owner can delete this calendar"}, 403
+
+    # 3) Prevent deletion of the default calendar
+    if cal_doc.get("isDefault"):
+        return {"error": "Cannot delete the default home calendar"}, 400
+
+    # 4) Delete associated events
+    try:
+        events_query = list(events_container.query_items(
+            query="SELECT * FROM Events e WHERE e.calendarId = @calId",
+            parameters=[{"name": "@calId", "value": calendar_id}],
+            enable_cross_partition_query=True
+        ))
+        for event in events_query:
+            events_container.delete_item(item=event["id"], partition_key=event["calendarId"])
+        logger.info("All events associated with calendar '%s' have been deleted", calendar_id)
+    except CosmosHttpResponseError as e:
+        logger.exception("Error deleting events for calendar '%s': %s", calendar_id, str(e))
+        return {"error": str(e)}, 500
+
+    # 5) Delete the calendar
+    try:
+        calendars_container.delete_item(item=calendar_id, partition_key=calendar_id)
+        logger.info("Calendar '%s' deleted successfully", calendar_id)
+        return {"message": "Personal calendar deleted successfully"}, 200
+    except CosmosHttpResponseError as e:
+        logger.exception("Error deleting calendar '%s': %s", calendar_id, str(e))
+        return {"error": str(e)}, 500
+
+
+# app/calendar_routes.py
+
+# app/calendar_routes.py
+
+def add_event(calendar_id: str, event_data: dict, user_id: str):
+    logger.info("Adding event to calendar %s by user %s", calendar_id, user_id)
 
     # 1) Verify calendar
     try:
         cal_query = list(calendars_container.query_items(
             query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
-            parameters=[{"name":"@calId", "value": calendar_id}],
+            parameters=[{"name": "@calId", "value": calendar_id}],
             enable_cross_partition_query=True
         ))
         if not cal_query:
+            logger.warning("Calendar '%s' not found.", calendar_id)
             return {"error": "Calendar not found"}, 404
+
+        cal_doc = cal_query[0]
     except CosmosHttpResponseError as e:
         logger.exception("Error querying calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
 
-    # 2) Create the event doc
-    try:
-        new_event = Event(**event_data)  # This can raise ValidationError for missing fields
-        new_event.calendarId = calendar_id  # Confirm the correct calendarId
-        new_event.creatorId = event_data.get("creatorId", "")  # or read from session
+    # 2) Check if user is a member of the calendar
+    if user_id not in cal_doc.get("members", []):
+        logger.warning("User '%s' is not a member of calendar '%s'", user_id, calendar_id)
+        return {"error": "User is not a member of this calendar"}, 403
 
-        # Convert to dict & set 'id' for Cosmos
-        item_dict = new_event.dict()
-        item_dict["startTime"] = new_event.startTime.isoformat()
-        item_dict["endTime"] = new_event.endTime.isoformat()
-        item_dict["id"] = new_event.eventId
+    # 3) Inject 'calendarId' into event_data
+    event_data['calendarId'] = calendar_id  # Add calendarId to event_data
+
+    # 4) Set 'creatorId' to 'user_id'
+    event_data['creatorId'] = user_id
+
+    # 5) Create the event doc
+    try:
+        new_event = Event(**event_data)  # Now calendarId and creatorId are included
+
+        # Serialize the Event object to JSON and then back to dict to ensure all fields are serializable
+        event_json = new_event.json()
+        item_dict = json.loads(event_json)
+        item_dict["id"] = new_event.eventId  # Set 'id' for Cosmos
+
+        # Debug log to inspect the serialized item_dict
+        logger.debug("Serialized event data: %s", json.dumps(item_dict, indent=2))
 
         events_container.create_item(item_dict)
         logger.info("Event '%s' created in calendar '%s'", new_event.eventId, calendar_id)
@@ -48,17 +161,40 @@ def add_event(calendar_id: str, event_data: dict):
         logger.warning("Validation error for event in calendar '%s': %s", calendar_id, ve)
         return {"error": str(ve)}, 422
 
+    except CosmosHttpResponseError as e:
+        # Handle Cosmos DB specific errors
+        logger.exception("Cosmos HTTP error while creating event: %s", str(e))
+        return {"error": str(e)}, 500
+
     except Exception as e:
         # Catch-all for other issues
         logger.exception("Error creating event in calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
 
-def get_events(calendar_id: str):
+def get_events(calendar_id: str, user_id: str):
     """
     Retrieves all events for a given calendar (by calendarId).
+    Ensures that the user is a member of the calendar.
     """
-    logger.info("Fetching events for calendar %s", calendar_id)
+    logger.info("Fetching events for calendar %s by user %s", calendar_id, user_id)
     try:
+        # Fetch calendar to verify membership
+        cal_query = list(calendars_container.query_items(
+            query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
+            parameters=[{"name": "@calId", "value": calendar_id}],
+            enable_cross_partition_query=True
+        ))
+        if not cal_query:
+            logger.warning("Calendar '%s' not found.", calendar_id)
+            return {"error": "Calendar not found"}, 404
+
+        cal_doc = cal_query[0]
+
+        # Check if user is a member
+        if user_id not in cal_doc.get("members", []):
+            logger.warning("User '%s' is not a member of calendar '%s'", user_id, calendar_id)
+            return {"error": "User is not a member of this calendar"}, 403
+
         events_query = list(events_container.query_items(
             query="SELECT * FROM Events e WHERE e.calendarId = @calId",
             parameters=[{"name": "@calId", "value": calendar_id}],
@@ -70,6 +206,82 @@ def get_events(calendar_id: str):
         logger.exception("Error fetching events for calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
 
+def update_event(calendar_id: str, event_id: str, updated_data: dict, user_id: str):
+    """
+    Updates an existing event in a calendar.
+    Ensures that the user is the creator of the event or has necessary permissions.
+    """
+    logger.info("Updating event '%s' in calendar '%s' by user '%s'", event_id, calendar_id, user_id)
+
+    try:
+        # Fetch the event document
+        event_query = list(events_container.query_items(
+            query="SELECT * FROM Events e WHERE e.eventId = @eventId AND e.calendarId = @calId",
+            parameters=[
+                {"name": "@eventId", "value": event_id},
+                {"name": "@calId", "value": calendar_id}
+            ],
+            enable_cross_partition_query=True
+        ))
+        if not event_query:
+            return {"error": "Event not found"}, 404
+
+        event_doc = event_query[0]
+
+        # Check if the user is the creator
+        if event_doc.get("creatorId") != user_id:
+            logger.warning("User '%s' is not the creator of event '%s'", user_id, event_id)
+            return {"error": "Only the creator can update this event"}, 403
+
+        # Update fields
+        for key, value in updated_data.items():
+            if key in event_doc and key not in ["eventId", "calendarId", "creatorId", "id"]:
+                event_doc[key] = value
+
+        # Upsert the updated event
+        events_container.upsert_item(event_doc)
+        logger.info("Event '%s' updated successfully in calendar '%s'", event_id, calendar_id)
+        return {"message": "Event updated successfully"}, 200
+
+    except CosmosHttpResponseError as e:
+        logger.exception("Error updating event '%s' in calendar '%s': %s", event_id, calendar_id, str(e))
+        return {"error": str(e)}, 500
+
+def delete_event(calendar_id: str, event_id: str, user_id: str):
+    """
+    Deletes an event from a calendar.
+    Ensures that the user is the creator of the event or has necessary permissions.
+    """
+    logger.info("Deleting event '%s' from calendar '%s' by user '%s'", event_id, calendar_id, user_id)
+
+    try:
+        # Fetch the event document
+        event_query = list(events_container.query_items(
+            query="SELECT * FROM Events e WHERE e.eventId = @eventId AND e.calendarId = @calId",
+            parameters=[
+                {"name": "@eventId", "value": event_id},
+                {"name": "@calId", "value": calendar_id}
+            ],
+            enable_cross_partition_query=True
+        ))
+        if not event_query:
+            return {"error": "Event not found"}, 404
+
+        event_doc = event_query[0]
+
+        # Check if the user is the creator
+        if event_doc.get("creatorId") != user_id:
+            logger.warning("User '%s' is not the creator of event '%s'", user_id, event_id)
+            return {"error": "Only the creator can delete this event"}, 403
+
+        # Delete the event
+        events_container.delete_item(item=event_doc["id"], partition_key=calendar_id)
+        logger.info("Event '%s' deleted successfully from calendar '%s'", event_id, calendar_id)
+        return {"message": "Event deleted successfully"}, 200
+
+    except CosmosHttpResponseError as e:
+        logger.exception("Error deleting event '%s' from calendar '%s': %s", event_id, calendar_id, str(e))
+        return {"error": str(e)}, 500
 
 def create_group_calendar(owner_id: str, name: str, members: list):
     """

@@ -1,12 +1,25 @@
 import logging
 import bcrypt
 from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpResponseError
+import jwt
+from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+
 
 from app.database import user_container, calendars_container
 from app.models import User, Calendar
 
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ALGORITHM = "HS256"
+JWT_EXP_DELTA_SECONDS = 1800
 
 def register_user(user_data: User):
     """
@@ -46,34 +59,31 @@ def register_user(user_data: User):
 
     # Build user item
     # The container is partitioned by /userId, so the doc must have userId property
-    # We'll also set "id" to user_data.userId to satisfy the 'id' field in Cosmos
+    # Also setting "id" to user_data.userId to satisfy the 'id' field in Cosmos
     user_item = user_data.dict()
     user_item["id"] = user_data.userId
 
     try:
-        # 1) Insert the user doc (no partition_key=...),
-        #    The library will infer the partition key from user_item["userId"].
+        # 1) Insert the user doc
         user_container.create_item(body=user_item)
 
-        # 2) Create a 'home' calendar
+        # 2) Create a 'home' calendar marked as default
         home_cal = Calendar(
-            name=f"{user_data.username}'s home Calendar",
+            name=f"{user_data.username}'s Home Calendar",
             ownerId=user_data.userId,
             isGroup=False,
+            isDefault=True,  # Mark as default
             members=[user_data.userId]
         )
         cal_item = home_cal.dict()
-        # For 'Calendars' container partitioned by /calendarId
-        cal_item["id"] = home_cal.calendarId
+        cal_item["id"] = home_cal.calendarId  # Cosmos 'id' fix
 
         calendars_container.create_item(body=cal_item)
-        # The library should infer partition key from cal_item["calendarId"].
 
-        # 3) Update user's "calendars" list
+        # Update user's "calendars" list
         user_data.calendars.append(home_cal.calendarId)
 
-        # 4) Upsert the updated user doc (again, no partition_key=...),
-        #    letting the library infer /userId
+        # 3) Upsert the updated user doc
         updated_user_item = user_data.dict()
         updated_user_item["id"] = user_data.userId
         user_container.upsert_item(body=updated_user_item)
@@ -94,6 +104,7 @@ def register_user(user_data: User):
 def login_user(username: str, password: str):
     """
     Logs in an existing user by checking their hashed password.
+    Generates a JWT token upon successful authentication.
     """
     logger.info("Received login request for username: %s", username)
 
@@ -113,7 +124,19 @@ def login_user(username: str, password: str):
     user_doc = user_query[0]
     if bcrypt.checkpw(password.encode("utf-8"), user_doc["password"].encode("utf-8")):
         logger.info("User '%s' logged in successfully", username)
-        return {"message": "Login successful", "userId": user_doc["userId"]}, 200
+        
+        # Create JWT payload
+        payload = {
+            "userId": user_doc["userId"],
+            "exp": datetime.utcnow() + timedelta(seconds=JWT_EXP_DELTA_SECONDS)
+        }
+        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+        return {
+            "message": "Login successful",
+            "userId": user_doc["userId"],
+            "token": token
+        }, 200
     else:
         logger.warning("Invalid credentials for user '%s'", username)
         return {"error": "Invalid credentials"}, 401
