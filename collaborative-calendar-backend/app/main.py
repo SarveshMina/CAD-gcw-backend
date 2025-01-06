@@ -1,5 +1,4 @@
 # app/main.py
-
 from azure.functions import HttpRequest, HttpResponse
 import json
 import logging
@@ -8,13 +7,9 @@ from app.user_routes import register_user, login_user
 from app.calendar_routes import (
     add_event, get_events,
     create_group_calendar, add_user_to_group_calendar, remove_user_from_group_calendar,
-    create_personal_calendar, delete_personal_calendar
+    create_personal_calendar, delete_personal_calendar,
+    update_event, delete_event
 )
-
-from app.calendar_routes import update_event, delete_event
-
-from app.auth import token_required
-
 from app.models import User
 
 logger = logging.getLogger(__name__)
@@ -31,14 +26,17 @@ def register(req: HttpRequest) -> HttpResponse:
         return HttpResponse(str(e), status_code=500)
 
 def login(req: HttpRequest) -> HttpResponse:
-    # Login does not require authentication
     try:
         req_body = req.get_json()
         username = req_body.get("username")
         password = req_body.get("password")
 
         if not username or not password:
-            return HttpResponse(json.dumps({"error": "Missing credentials"}), status_code=400, mimetype="application/json")
+            return HttpResponse(
+                json.dumps({"error": "Missing credentials"}),
+                status_code=400,
+                mimetype="application/json"
+            )
 
         response, status_code = login_user(username, password)
         return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
@@ -46,73 +44,88 @@ def login(req: HttpRequest) -> HttpResponse:
         logger.exception("Error in login endpoint: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
-@token_required
-def create_event(req: HttpRequest, calendar_id: str, user_id: str) -> HttpResponse:
-    """
-    Called from function_app.py's create_event_function
-    which extracts 'calendar_id' from req.route_params.
-    """
-    try:
-        logger.info("Create event endpoint hit for calendar %s by user %s", calendar_id, user_id)
-        event_data = req.get_json()
+#
+# Instead of @token_required, we just allow calls.
+# We'll assume we get userId from the request body for membership checks, or we skip them entirely.
+#
 
-        # Optionally, enforce that the user is a member of the calendar
-        response, status_code = add_event(calendar_id, event_data, user_id)
+def create_event(req: HttpRequest, calendar_id: str) -> HttpResponse:
+    try:
+        # Suppose we get userId from the request body or query
+        req_body = req.get_json()
+        user_id = req_body.get("userId")  # new approach
+        logger.info("Create event endpoint for calendar %s by user %s", calendar_id, user_id)
+
+        response, status_code = add_event(calendar_id, req_body, user_id)
         return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in create_event endpoint: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
-@token_required
-def list_events(req: HttpRequest, calendar_id: str, user_id: str) -> HttpResponse:
+
+def list_events(req: HttpRequest, calendar_id: str) -> HttpResponse:
     """
-    Called from function_app.py's list_events_function.
+    GET /calendar/{calendar_id}/events?userId=<...>
     """
     try:
-        logger.info("List events endpoint hit for calendar %s by user %s", calendar_id, user_id)
+        # 1) userId from query param (if needed):
+        user_id = req.params.get("userId", "")
+
+        # 2) (Optional) If you *require* userId, you can do a quick check:
+        # if not user_id:
+        #     return HttpResponse(
+        #         json.dumps({"error": "Missing userId query param"}),
+        #         status_code=400,
+        #         mimetype="application/json"
+        #     )
+
+        logger.info("List events endpoint for calendar %s by user %s", calendar_id, user_id)
+
+        # 3) Pass the calendarId & userId to your DB function
+        #    (assuming get_events(...) is defined & checks membership).
         response, status_code = get_events(calendar_id, user_id)
-        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+
+        # 4) Return result
+        return HttpResponse(
+            json.dumps(response),
+            status_code=status_code,
+            mimetype="application/json"
+        )
+
     except Exception as e:
         logger.exception("Error in list_events endpoint: %s", str(e))
-        return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
-    
-@token_required
-def update_event_handler(req: HttpRequest, calendar_id: str, event_id: str, user_id: str) -> HttpResponse:
-    """
-    Updates an existing event in a calendar.
-    """
+        return HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+
+
+def update_event_handler(req: HttpRequest, calendar_id: str, event_id: str) -> HttpResponse:
     try:
-        updated_data = req.get_json()
-        response, status_code = update_event(calendar_id, event_id, updated_data, user_id)
+        req_body = req.get_json()
+        user_id = req_body.get("userId") 
+        response, status_code = update_event(calendar_id, event_id, req_body, user_id)
         return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in update_event_handler: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
-@token_required
-def delete_event_handler(req: HttpRequest, calendar_id: str, event_id: str, user_id: str) -> HttpResponse:
-    """
-    Deletes an event from a calendar.
-    """
+
+def delete_event_handler(req: HttpRequest, calendar_id: str, event_id: str) -> HttpResponse:
     try:
+        req_body = req.get_json()
+        user_id = req_body.get("userId")
         response, status_code = delete_event(calendar_id, event_id, user_id)
         return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in delete_event_handler: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
-# -----------------------------
-# Group Calendar Endpoints
-# -----------------------------
+
 def create_group(req: HttpRequest) -> HttpResponse:
-    """
-    Example request body:
-    {
-      "ownerId": "someUserId",
-      "name": "CAD Project Group",
-      "members": ["otherUserId1", "otherUserId2"]
-    }
-    """
     try:
         body = req.get_json()
         owner_id = body.get("ownerId")
@@ -128,14 +141,8 @@ def create_group(req: HttpRequest) -> HttpResponse:
         logger.exception("Error in create_group endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
 
+
 def add_user_to_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
-    """
-    Expects request body:
-    {
-      "adminId": "theAdminUserId",
-      "userId": "theUserToAdd"
-    }
-    """
     try:
         body = req.get_json()
         admin_id = body.get("adminId")
@@ -151,13 +158,6 @@ def add_user_to_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
         return HttpResponse(str(e), status_code=500)
 
 def remove_user_from_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
-    """
-    Expects request body:
-    {
-      "adminId": "theAdminUserId",
-      "userId": "theUserToRemove"
-    }
-    """
     try:
         body = req.get_json()
         admin_id = body.get("adminId")
@@ -172,18 +172,7 @@ def remove_user_from_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
         logger.exception("Error in remove_user_from_group endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
 
-# -----------------------------
-# Personal Calendar Endpoints
-# -----------------------------
 def create_personal(req: HttpRequest) -> HttpResponse:
-    """
-    Creates a new personal calendar for a user.
-    Example request body:
-    {
-      "userId": "someUserId",
-      "name": "Work Calendar"
-    }
-    """
     try:
         body = req.get_json()
         user_id = body.get("userId")
@@ -199,13 +188,6 @@ def create_personal(req: HttpRequest) -> HttpResponse:
         return HttpResponse(str(e), status_code=500)
 
 def delete_personal(req: HttpRequest, calendar_id: str) -> HttpResponse:
-    """
-    Deletes a personal calendar.
-    Example request body:
-    {
-      "userId": "someUserId"
-    }
-    """
     try:
         body = req.get_json()
         user_id = body.get("userId")

@@ -105,10 +105,22 @@ def delete_personal_calendar(user_id: str, calendar_id: str):
         logger.exception("Error deleting calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
 
-
-# app/calendar_routes.py
-
-# app/calendar_routes.py
+def get_user_calendars(user_id: str):
+    """
+    Retrieves all calendars where the user is a member.
+    """
+    try:
+        query = "SELECT * FROM Calendars c WHERE ARRAY_CONTAINS(c.members, @userId)"
+        parameters = [{"name": "@userId", "value": user_id}]
+        calendars = list(calendars_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        return {"calendars": calendars}, 200
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching calendars for user '%s': %s", user_id, str(e))
+        return {"error": str(e)}, 500
 
 def add_event(calendar_id: str, event_data: dict, user_id: str):
     logger.info("Adding event to calendar %s by user %s", calendar_id, user_id)
@@ -173,38 +185,40 @@ def add_event(calendar_id: str, event_data: dict, user_id: str):
 
 def get_events(calendar_id: str, user_id: str):
     """
-    Retrieves all events for a given calendar (by calendarId).
-    Ensures that the user is a member of the calendar.
+    Retrieve all events for the given calendar_id.
+    Optionally, check if user_id is a member of this calendar.
     """
     logger.info("Fetching events for calendar %s by user %s", calendar_id, user_id)
     try:
-        # Fetch calendar to verify membership
+        # 1) Fetch the calendar doc
         cal_query = list(calendars_container.query_items(
             query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
             parameters=[{"name": "@calId", "value": calendar_id}],
             enable_cross_partition_query=True
         ))
         if not cal_query:
-            logger.warning("Calendar '%s' not found.", calendar_id)
             return {"error": "Calendar not found"}, 404
 
         cal_doc = cal_query[0]
 
-        # Check if user is a member
-        if user_id not in cal_doc.get("members", []):
+        # 2) If you require user membership, check if user_id is in members
+        if user_id and user_id not in cal_doc.get("members", []):
             logger.warning("User '%s' is not a member of calendar '%s'", user_id, calendar_id)
             return {"error": "User is not a member of this calendar"}, 403
 
+        # 3) Query events by calendarId
         events_query = list(events_container.query_items(
             query="SELECT * FROM Events e WHERE e.calendarId = @calId",
             parameters=[{"name": "@calId", "value": calendar_id}],
             enable_cross_partition_query=True
         ))
+
         return {"events": events_query}, 200
 
     except CosmosHttpResponseError as e:
         logger.exception("Error fetching events for calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
+
 
 def update_event(calendar_id: str, event_id: str, updated_data: dict, user_id: str):
     """

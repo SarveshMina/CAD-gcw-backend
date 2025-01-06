@@ -14,6 +14,7 @@ class User(BaseModel):
     email: Optional[str] = None  # optional field
     userId: str = Field(default_factory=lambda: str(uuid.uuid4()))  # unique identifier for the user
     calendars: List[str] = []  # store calendarIds the user has
+    default_calendar_id: str = ""  # store the default calendarId for the user
 
 # -----------------------
 # Calendar Model
