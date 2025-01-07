@@ -5,7 +5,7 @@ from app.main import (
     register, login,
     create_event, list_events,
     create_group, add_user_to_group, remove_user_from_group,
-    create_personal, delete_personal,
+    func_create_personal_calendar, delete_personal,
     update_event_handler, delete_event_handler
 )
 
@@ -59,9 +59,33 @@ def remove_user_from_group_function(req: func.HttpRequest) -> func.HttpResponse:
 # Personal Calendar Endpoints
 @app.route(route="personal-calendar/create", methods=["POST"])
 def create_personal_function(req: func.HttpRequest) -> func.HttpResponse:
-    return create_personal(req)
+    return func_create_personal_calendar(req)
 
 @app.route(route="personal-calendar/{calendar_id}/delete", methods=["POST"])
 def delete_personal_function(req: func.HttpRequest) -> func.HttpResponse:
     calendar_id = req.route_params.get("calendar_id")
     return delete_personal(req, calendar_id)
+
+@app.route(route="user/{user_id}/calendars", methods=["GET"])
+def list_user_calendars(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    GET /user/{user_id}/calendars
+    Returns all calendars where the user is a member.
+    """
+    from app.calendar_routes import get_user_calendars
+    import json
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        user_id = req.route_params.get("user_id")
+        response, status_code = get_user_calendars(user_id)
+        return func.HttpResponse(
+            json.dumps(response),
+            status_code=status_code,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logger.exception("Error in list_user_calendars endpoint: %s", str(e))
+        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500)

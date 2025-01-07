@@ -172,7 +172,7 @@ def remove_user_from_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
         logger.exception("Error in remove_user_from_group endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
 
-def create_personal(req: HttpRequest) -> HttpResponse:
+def func_create_personal_calendar(req: HttpRequest) -> HttpResponse:
     try:
         body = req.get_json()
         user_id = body.get("userId")
