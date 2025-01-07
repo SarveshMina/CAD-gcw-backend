@@ -69,7 +69,7 @@ func start
 
 The app will run at:  
 ```
-http://localhost:7071/api/
+http://localhost:7071/
 ```  
 
 ---
@@ -80,7 +80,7 @@ Create a `.env` file in the root directory to store sensitive environment variab
 
 ```ini
 COSMOS_CONNECTION_STRING=<Your-Cosmos-DB-Connection-String>
-AZURE_FUNC_URL=http://localhost:7071/api/
+AZURE_FUNC_URL=http://localhost:7071/
 ```  
 
 - **COSMOS_CONNECTION_STRING** – Connection string for Cosmos DB.  
