@@ -58,11 +58,11 @@ def remove_user_from_group_function(req: func.HttpRequest) -> func.HttpResponse:
 
 # Personal Calendar Endpoints
 @app.route(route="personal-calendar/create", methods=["POST"])
-def create_personal_function(req: func.HttpRequest) -> func.HttpResponse:
+def create_personal_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
     return func_create_personal_calendar(req)
 
 @app.route(route="personal-calendar/{calendar_id}/delete", methods=["POST"])
-def delete_personal_function(req: func.HttpRequest) -> func.HttpResponse:
+def delete_personal_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
     calendar_id = req.route_params.get("calendar_id")
     return delete_personal(req, calendar_id)
 

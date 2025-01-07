@@ -98,7 +98,7 @@ def delete_personal_calendar(user_id: str, calendar_id: str):
 
     # 5) Delete the calendar
     try:
-        calendars_container.delete_item(item=calendar_id, partition_key=calendar_id)
+        calendars_container.delete_item(item=cal_doc["id"], partition_key=calendar_id)
         logger.info("Calendar '%s' deleted successfully", calendar_id)
         return {"message": "Personal calendar deleted successfully"}, 200
     except CosmosHttpResponseError as e:
