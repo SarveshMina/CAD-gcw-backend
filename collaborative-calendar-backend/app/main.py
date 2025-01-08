@@ -2,6 +2,7 @@
 from azure.functions import HttpRequest, HttpResponse
 import json
 import logging
+from pydantic import ValidationError
 
 from app.user_routes import register_user, login_user
 from app.calendar_routes import (
@@ -20,10 +21,13 @@ def register(req: HttpRequest) -> HttpResponse:
         req_body = req.get_json()
         user = User(**req_body)
         response, status_code = register_user(user)
-        return HttpResponse(json.dumps(response), status_code=status_code)
+        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+    except ValidationError as ve:
+        logger.exception("Validation error in register endpoint: %s", str(ve))
+        return HttpResponse(json.dumps({"error": str(ve)}), status_code=422, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in register endpoint: %s", str(e))
-        return HttpResponse(str(e), status_code=500)
+        return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 def login(req: HttpRequest) -> HttpResponse:
     try:
@@ -43,7 +47,6 @@ def login(req: HttpRequest) -> HttpResponse:
     except Exception as e:
         logger.exception("Error in login endpoint: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
-
 #
 # Instead of @token_required, we just allow calls.
 # We'll assume we get userId from the request body for membership checks, or we skip them entirely.
@@ -126,20 +129,50 @@ def delete_event_handler(req: HttpRequest, calendar_id: str, event_id: str) -> H
 
 
 def create_group(req: HttpRequest) -> HttpResponse:
+    """
+    Endpoint to create a group calendar.
+    Expects JSON body with:
+    - ownerId: str
+    - name: str
+    - members: list of usernames (max 4)
+    - color: str (optional but required by create_group_calendar)
+    """
     try:
         body = req.get_json()
         owner_id = body.get("ownerId")
         name = body.get("name")
-        members = body.get("members", [])
+        members_usernames = body.get("members", [])
+        # Extract color from request (fallback to one of your allowed colors if not present)
+        color = body.get("color", "pink")
 
+        # Basic validation
         if not owner_id or not name:
-            return HttpResponse(json.dumps({"error": "Missing ownerId or name"}), status_code=400)
+            return HttpResponse(
+                json.dumps({"error": "Missing ownerId or name"}),
+                status_code=400,
+                mimetype="application/json"
+            )
 
-        response, status_code = create_group_calendar(owner_id, name, members)
-        return HttpResponse(json.dumps(response), status_code=status_code)
+        if not isinstance(members_usernames, list):
+            return HttpResponse(
+                json.dumps({"error": "Members should be a list of usernames"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        if len(members_usernames) > 4:
+            return HttpResponse(
+                json.dumps({"error": "Cannot add more than 4 members to the group calendar"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        # Pass color to create_group_calendar
+        response, status_code = create_group_calendar(owner_id, name, members_usernames, color)
+        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in create_group endpoint: %s", str(e))
-        return HttpResponse(str(e), status_code=500)
+        return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
 def add_user_to_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
@@ -177,19 +210,27 @@ def func_create_personal_calendar(req: HttpRequest) -> HttpResponse:
         body = req.get_json()
         user_id = body.get("userId")
         name = body.get("name")
+        # Extract color from the request body (default it if not present)
+        color = body.get("color", "pink")  # or your desired default color
 
         if not user_id or not name:
-            return HttpResponse(json.dumps({"error": "Missing userId or name"}), status_code=400)
+            return HttpResponse(
+                json.dumps({"error": "Missing userId or name"}),
+                status_code=400,
+                mimetype="application/json"
+            )
 
-        response, status_code = create_personal_calendar(user_id, name)
+        # Now pass color to create_personal_calendar
+        response, status_code = create_personal_calendar(user_id, name, color)
         return HttpResponse(json.dumps(response), status_code=status_code)
     except Exception as e:
         logger.exception("Error in create_personal endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
 
+
 def delete_personal(req: HttpRequest, calendar_id: str) -> HttpResponse:
     try:
-        body = req.get_json()
+        body = req.get_json()   
         user_id = body.get("userId")
 
         if not user_id:

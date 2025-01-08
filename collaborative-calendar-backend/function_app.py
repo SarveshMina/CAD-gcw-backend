@@ -8,6 +8,7 @@ from app.main import (
     func_create_personal_calendar, delete_personal,
     update_event_handler, delete_event_handler
 )
+from app.calendar_routes import get_user_calendars  # Ensure this is imported
 
 app = func.FunctionApp()
 
@@ -88,4 +89,8 @@ def list_user_calendars(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as e:
         logger.exception("Error in list_user_calendars endpoint: %s", str(e))
-        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500)
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )

@@ -57,9 +57,11 @@ def register_user(user_data: User):
             isDefault=True,
             members=[user_data.userId]
         )
-        cal_item = home_cal.dict()
-        cal_item["id"] = home_cal.calendarId
-        calendars_container.create_item(body=cal_item)
+        home_cal_dict = home_cal.dict()
+        home_cal_dict["id"] = home_cal.calendarId
+        home_cal_dict["color"] = "blue"  # default color is "blue" here
+
+        calendars_container.create_item(body=home_cal_dict)
 
         # Set up default_calendar_id
         user_data.calendars.append(home_cal.calendarId)

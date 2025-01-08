@@ -6,12 +6,11 @@ from datetime import datetime
 from pydantic import ValidationError
 from azure.cosmos.exceptions import CosmosHttpResponseError
 
-from app.database import calendars_container, events_container
-from app.models import Event, Calendar
+from app.database import calendars_container, events_container, user_container  # Added user_container
+from app.models import Event, Calendar, CalendarColor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
 
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
@@ -20,13 +19,19 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
 
 
-def create_personal_calendar(user_id: str, name: str):
+def create_personal_calendar(user_id: str, name: str, color: str):
     """
     create_personal_calendar:
     Creates a new calendar with isGroup=False and isDefault=False.
     Associates the calendar with the user by setting ownerId and including the user in members.
     """
-    logger.info("Creating personal calendar '%s' for user '%s'", name, user_id)
+    logger.info("Creating personal calendar '%s' for user '%s' with color '%s'", name, user_id, color)
+
+    # Define allowed colors excluding 'blue'
+    allowed_colors = [color.value for color in CalendarColor if color != CalendarColor.blue]
+    if color not in allowed_colors:
+        logger.warning("Invalid color '%s' for calendar '%s'", color, name)
+        return {"error": f"Invalid color. Allowed colors are: {', '.join(allowed_colors)}"}, 400
 
     # Create the Calendar model
     personal_cal = Calendar(
@@ -34,14 +39,15 @@ def create_personal_calendar(user_id: str, name: str):
         ownerId=user_id,
         isGroup=False,
         isDefault=False,  # Not a default calendar
-        members=[user_id]
+        members=[user_id],
+        color=color
     )
     cal_item = personal_cal.dict()
     cal_item["id"] = personal_cal.calendarId  # Cosmos 'id' fix
 
     try:
         calendars_container.create_item(cal_item)
-        logger.info("Personal calendar '%s' created with ID '%s'", name, personal_cal.calendarId)
+        logger.info("Personal calendar '%s' created with ID '%s' and color '%s'", name, personal_cal.calendarId, color)
         return {
             "message": "Personal calendar created successfully",
             "calendarId": personal_cal.calendarId
@@ -49,6 +55,7 @@ def create_personal_calendar(user_id: str, name: str):
     except CosmosHttpResponseError as e:
         logger.exception("Error creating personal calendar: %s", str(e))
         return {"error": str(e)}, 500
+
 
 def delete_personal_calendar(user_id: str, calendar_id: str):
     """
@@ -297,31 +304,88 @@ def delete_event(calendar_id: str, event_id: str, user_id: str):
         logger.exception("Error deleting event '%s' from calendar '%s': %s", event_id, calendar_id, str(e))
         return {"error": str(e)}, 500
 
-def create_group_calendar(owner_id: str, name: str, members: list):
-    """
-    Creates a new group calendar with the specified owner_id (admin) and members.
-    The 'owner_id' will be the admin of this group calendar.
-    The 'members' list can optionally include other userIds right from creation.
-    """
-    logger.info("Creating group calendar for owner '%s' with name '%s'", owner_id, name)
 
-    # The admin must always be in the members list:
-    if owner_id not in members:
-        members.append(owner_id)
+# Helper functions for creating group calendars
+# and managing group members
+def get_user_id(username: str):
+    """
+    Retrieves the userId for a given username.
+    Returns None if the user does not exist.
+    """
+    try:
+        user_query = list(user_container.query_items(
+            query="SELECT * FROM Users u WHERE u.username = @username",
+            parameters=[{"name": "@username", "value": username}],
+            enable_cross_partition_query=True
+        ))
+        if not user_query:
+            return None
+        return user_query[0]["userId"]
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching user '%s': %s", username, str(e))
+        return None
 
-    # Create the Calendar model:
+
+
+def create_group_calendar(owner_id: str, name: str, members_usernames: list, color: str):
+    """
+    Creates a new group calendar with specified members and color.
+    """
+    logger.info("Creating group calendar '%s' for owner '%s' with color '%s' and members %s", name, owner_id, color, members_usernames)
+
+    # Define allowed colors excluding 'blue'
+    allowed_colors = [color.value for color in CalendarColor if color != CalendarColor.blue]
+    if color not in allowed_colors:
+        logger.warning("Invalid color '%s' for group calendar '%s'", color, name)
+        return {"error": f"Invalid color. Allowed colors are: {', '.join(allowed_colors)}"}, 400
+    
+    # 1. Validate owner exists
+    try:
+        owner_query = list(user_container.query_items(
+            query="SELECT * FROM Users u WHERE u.userId = @userId",
+            parameters=[{"name": "@userId", "value": owner_id}],
+            enable_cross_partition_query=True
+        ))
+        if not owner_query:
+            logger.warning("Owner with userId '%s' does not exist.", owner_id)
+            return {"error": "Owner does not exist"}, 404
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching owner '%s': %s", owner_id, str(e))
+        return {"error": str(e)}, 500
+    
+    # 2. Map member usernames to userIds
+    member_ids = []
+    for username in members_usernames:
+        user_id = get_user_id(username)
+        if not user_id:
+            logger.warning("Member username '%s' does not exist.", username)
+            return {"error": f"User '{username}' does not exist"}, 404
+        member_ids.append(user_id)
+    
+    # 3. Include owner in members if not already present
+    if owner_id not in member_ids:
+        member_ids.append(owner_id)
+    
+    # 4. Enforce maximum of 5 members
+    if len(member_ids) > 5:
+        logger.warning("Attempted to create group calendar with %d members. Maximum allowed is 5.", len(member_ids))
+        return {"error": "Cannot have more than 5 members in a group calendar"}, 400
+    
+    # 5. Create the Calendar model
+    # Create the Calendar model
     group_cal = Calendar(
         name=name,
         ownerId=owner_id,
         isGroup=True,
-        members=members  # includes owner
+        members=member_ids,
+        color=color
     )
     cal_item = group_cal.dict()
-    cal_item["id"] = group_cal.calendarId  # cosmos 'id' fix
+    cal_item["id"] = group_cal.calendarId  # Cosmos 'id' fix
 
     try:
         calendars_container.create_item(cal_item)
-        logger.info("Group calendar '%s' created (ownerId=%s)", group_cal.calendarId, owner_id)
+        logger.info("Group calendar '%s' created with ID '%s' and color '%s'", name, group_cal.calendarId, color)
         return {
             "message": "Group calendar created successfully",
             "calendarId": group_cal.calendarId
@@ -329,7 +393,6 @@ def create_group_calendar(owner_id: str, name: str, members: list):
     except CosmosHttpResponseError as e:
         logger.exception("Error creating group calendar: %s", str(e))
         return {"error": str(e)}, 500
-
 
 def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     """

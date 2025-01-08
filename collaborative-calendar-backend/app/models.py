@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
 from datetime import datetime
+from enum import Enum  # Import Enum
 
 # -----------------------
 # User Model
@@ -17,6 +18,18 @@ class User(BaseModel):
     default_calendar_id: str = ""  # store the default calendarId for the user
 
 # -----------------------
+# Calendar Color Enum
+# -----------------------
+class CalendarColor(str, Enum):
+    blue = "blue"
+    pink = "pink"
+    green = "green"
+    yellow = "yellow"
+    red = "red"
+    purple = "purple"
+    orange = "orange"
+
+# -----------------------
 # Calendar Model
 # -----------------------
 class Calendar(BaseModel):
@@ -26,6 +39,10 @@ class Calendar(BaseModel):
     isGroup: bool = False  # personal vs. group
     isDefault: bool = False  # marks the default (home) calendar
     members: List[str] = []  # for group calendars, store member userIds
+    color: CalendarColor = "blue"  # default color is blue
+
+    class Config:
+        use_enum_values = True  # Ensures enums are serialized as their values
 
 # -----------------------
 # Event Model
