@@ -6,7 +6,8 @@ from app.main import (
     create_event, list_events,
     create_group, add_user_to_group, remove_user_from_group,
     func_create_personal_calendar, delete_personal,
-    update_event_handler, delete_event_handler
+    update_event_handler, delete_event_handler,
+    get_user_id_handler, get_all_events_handler  
 )
 from app.calendar_routes import get_user_calendars  # Ensure this is imported
 
@@ -41,6 +42,17 @@ def delete_event_function(req: func.HttpRequest) -> func.HttpResponse:
     calendar_id = req.route_params.get("calendar_id")
     event_id = req.route_params.get("event_id")
     return delete_event_handler(req, calendar_id, event_id)
+
+
+@app.route(route="user/{user_id}/events", methods=["GET"])
+def get_all_events_function(req: func.HttpRequest) -> func.HttpResponse:
+    user_id = req.route_params.get("user_id")
+    return get_all_events_handler(req, user_id)
+
+@app.route(route="user/{username}/id", methods=["GET"])
+def get_user_id_function(req: func.HttpRequest) -> func.HttpResponse:
+    username = req.route_params.get("username")
+    return get_user_id_handler(req, username)
 
 # Group Calendar Endpoints
 @app.route(route="group-calendar/create", methods=["POST"])

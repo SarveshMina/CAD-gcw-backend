@@ -129,6 +129,46 @@ def get_user_calendars(user_id: str):
         logger.exception("Error fetching calendars for user '%s': %s", user_id, str(e))
         return {"error": str(e)}, 500
 
+
+def get_all_events_for_user(user_id: str):
+    """
+    Fetches all events across all calendars the user is a member of.
+    Returns a list of event dictionaries.
+    """
+    try:
+        # 1. Get all calendars where the user is a member
+        query = "SELECT * FROM c WHERE ARRAY_CONTAINS(c.members, @userId)"
+        parameters = [{"name": "@userId", "value": user_id}]
+        calendars = list(calendars_container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True
+        ))
+        calendar_ids = [cal['calendarId'] for cal in calendars]
+        
+        if not calendar_ids:
+            return []
+        
+        # 2. Fetch all events from these calendars
+        # Cosmos DB SQL API doesn't support array parameters directly, so we'll construct a dynamic query
+        # For simplicity, we'll fetch events per calendar and aggregate them
+        all_events = []
+        for cal_id in calendar_ids:
+            event_query = "SELECT * FROM e WHERE e.calendarId = @calId"
+            event_params = [{"name": "@calId", "value": cal_id}]
+            events = list(events_container.query_items(
+                query=event_query,
+                parameters=event_params,
+                enable_cross_partition_query=True
+            ))
+            all_events.extend(events)
+        
+        return all_events
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching events for user '%s': %s", user_id, str(e))
+        return []
+
+
 def add_event(calendar_id: str, event_data: dict, user_id: str):
     logger.info("Adding event to calendar %s by user %s", calendar_id, user_id)
 

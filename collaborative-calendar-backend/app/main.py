@@ -9,8 +9,8 @@ from app.calendar_routes import (
     add_event, get_events,
     create_group_calendar, add_user_to_group_calendar, remove_user_from_group_calendar,
     create_personal_calendar, delete_personal_calendar,
-    update_event, delete_event
-)
+    update_event, delete_event, get_user_id, get_all_events_for_user)
+
 from app.models import User
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,30 @@ def login(req: HttpRequest) -> HttpResponse:
     except Exception as e:
         logger.exception("Error in login endpoint: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
-#
+
+
+def get_all_events_handler(req: HttpRequest, user_id: str) -> HttpResponse:
+    """
+    Handler to get all events across all calendars the user is a member of.
+    GET /user/{user_id}/events
+    Returns { events: [...] }
+    """
+    try:
+        events = get_all_events_for_user(user_id)
+        return HttpResponse(
+            json.dumps({"events": events}),
+            status_code=200,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logger.exception("Error in get_all_events_handler: %s", str(e))
+        return HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
 # Instead of @token_required, we just allow calls.
 # We'll assume we get userId from the request body for membership checks, or we skip them entirely.
 #
@@ -174,6 +197,32 @@ def create_group(req: HttpRequest) -> HttpResponse:
         logger.exception("Error in create_group endpoint: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
+def get_user_id_handler(req: HttpRequest, username: str) -> HttpResponse:
+    """
+    Handler to get userId based on username.
+    GET /user/{username}/id
+    """
+    try:
+        user_id = get_user_id(username)
+        if user_id:
+            return HttpResponse(
+                json.dumps({"userId": user_id}),
+                status_code=200,
+                mimetype="application/json"
+            )
+        else:
+            return HttpResponse(
+                json.dumps({"error": f"User '{username}' does not exist."}),
+                status_code=404,
+                mimetype="application/json"
+            )
+    except Exception as e:
+        logger.exception("Error in get_user_id_handler: %s", str(e))
+        return HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
 
 def add_user_to_group(req: HttpRequest, calendar_id: str) -> HttpResponse:
     try:
