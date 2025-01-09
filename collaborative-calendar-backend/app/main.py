@@ -1,4 +1,5 @@
 # app/main.py
+
 from azure.functions import HttpRequest, HttpResponse
 import json
 import logging
@@ -9,7 +10,8 @@ from app.calendar_routes import (
     add_event, get_events,
     create_group_calendar, add_user_to_group_calendar, remove_user_from_group_calendar,
     create_personal_calendar, delete_personal_calendar,
-    update_event, delete_event, get_user_id, get_all_events_for_user)
+    update_event, delete_event, get_user_id, get_all_events_for_user,
+    edit_group_calendar, leave_group_calendar)
 
 from app.models import User
 
@@ -69,17 +71,72 @@ def get_all_events_handler(req: HttpRequest, user_id: str) -> HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
+    
+def edit_group_calendar_handler(req: HttpRequest, calendar_id: str) -> HttpResponse:
+    """
+    Handler to edit group calendar's name and color.
+    Expects JSON body with fields to update: name and/or color.
+    """
+    try:
+        body = req.get_json()
+        admin_id = body.get("adminId")  # Assuming adminId is sent in the request body
+        if not admin_id:
+            return HttpResponse(
+                json.dumps({"error": "Missing adminId in request body."}),
+                status_code=400,
+                mimetype="application/json"
+            )
+        updated_data = {}
+        if "name" in body:
+            updated_data["name"] = body["name"]
+        if "color" in body:
+            updated_data["color"] = body["color"]
+        if not updated_data:
+            return HttpResponse(
+                json.dumps({"error": "No valid fields to update."}),
+                status_code=400,
+                mimetype="application/json"
+            )
+        response, status_code = edit_group_calendar(calendar_id, admin_id, updated_data)
+        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+    except Exception as e:
+        logger.exception("Error in edit_group_calendar endpoint: %s", str(e))
+        return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
+
+
+def leave_group_calendar_handler(req: HttpRequest, calendar_id: str) -> HttpResponse:
+    """
+    Handler for a user to leave a group calendar.
+    Expects JSON body with 'userId'.
+    """
+    try:
+        body = req.get_json()
+        user_id = body.get("userId")
+        if not user_id:
+            return HttpResponse(
+                json.dumps({"error": "Missing userId in request body."}),
+                status_code=400,
+                mimetype="application/json"
+            )
+        response, status_code = leave_group_calendar(calendar_id, user_id)
+        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+    except Exception as e:
+        logger.exception("Error in leave_group_calendar_handler: %s", str(e))
+        return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
 # Instead of @token_required, we just allow calls.
 # We'll assume we get userId from the request body for membership checks, or we skip them entirely.
-#
-
 def create_event(req: HttpRequest, calendar_id: str) -> HttpResponse:
     try:
-        # Suppose we get userId from the request body or query
         req_body = req.get_json()
-        user_id = req_body.get("userId")  # new approach
+        user_id = req_body.get("userId")  # Ensure userId is provided in the request body
+        if not user_id:
+            return HttpResponse(
+                json.dumps({"error": "Missing userId in request body."}),
+                status_code=400,
+                mimetype="application/json"
+            )
         logger.info("Create event endpoint for calendar %s by user %s", calendar_id, user_id)
 
         response, status_code = add_event(calendar_id, req_body, user_id)
