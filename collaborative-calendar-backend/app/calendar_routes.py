@@ -5,11 +5,13 @@ import json
 from datetime import datetime
 from typing import Tuple, List
 
+import requests
 from pydantic import ValidationError
 from azure.cosmos.exceptions import CosmosHttpResponseError
 
 from app.database import calendars_container, events_container, user_container
 from app.models import Event, Calendar, CalendarColor
+from app.signalr_helper import SignalRHelper  # Import the helper class
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,6 +21,56 @@ if not logger.hasHandlers():
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+SIGNALR_CONNECTION_STRING = "Endpoint=Endpoint=https://calendifysignalr.service.signalr.net;AccessKey=6iJAASICah926Ieqzh78OB7bCTUaea0BN7TUOwvu1L9K7WVwOgpbJQQJ99BAACmepeSXJ3w3AAAAASRS8YAc;Version=1.0;"
+SIGNALR_HUB_NAME = "chat"  # Define your hub name
+
+signalr_helper = SignalRHelper(SIGNALR_CONNECTION_STRING)
+
+def send_message_to_group(calendar_id: str, sender_id: str, message: str) -> Tuple[dict, int]:
+    """
+    Sends a chat message to a group associated with the calendar.
+    
+    :param calendar_id: The ID of the calendar (used as group name).
+    :param sender_id: The user ID of the sender.
+    :param message: The message content.
+    :return: Tuple of response dict and status code.
+    """
+    logger.info(f"User '{sender_id}' sending message to group '{calendar_id}': {message}")
+    
+    # Fetch sender's username
+    try:
+        sender_query = list(user_container.query_items(
+            query="SELECT c.username FROM Users c WHERE c.userId = @userId",
+            parameters=[{"name": "@userId", "value": sender_id}],
+            enable_cross_partition_query=True
+        ))
+        if sender_query:
+            sender_username = sender_query[0]['username']
+        else:
+            sender_username = sender_id  # Fallback to userId if username not found
+    except CosmosHttpResponseError as e:
+        logger.exception(f"Error fetching username for userId '{sender_id}': {str(e)}")
+        sender_username = sender_id
+    
+    # Prepare the message payload
+    message_payload = {
+        "sender": sender_username,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat() + 'Z'
+    }
+    
+    # Send the message to the SignalR group
+    success, error = signalr_helper.send_to_group(
+        hub_name=SIGNALR_HUB_NAME,
+        group_name=calendar_id,  # Using calendar_id as the group name
+        message=message_payload
+    )
+    
+    if success:
+        return {"message": "Message sent successfully"}, 200
+    else:
+        return {"error": f"Failed to send message: {error}"}, 500
 
 def create_personal_calendar(user_id: str, name: str, color: str):
     """
