@@ -8,9 +8,11 @@ from app.main import (
     func_create_personal_calendar, delete_personal,
     update_event_handler, delete_event_handler,
     get_user_id_handler, get_all_events_handler,
-    edit_group_calendar_handler, leave_group_calendar_handler
+    edit_group_calendar_handler, leave_group_calendar_handler,
+    update_user_handler
 )
-from app.calendar_routes import get_user_calendars, send_message_to_group  # Import the chat function
+
+
 import logging
 import json
 
@@ -113,39 +115,6 @@ def list_user_calendars(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as e:
         logger.exception("Error in list_user_calendars endpoint: %s", str(e))
-        return func.HttpResponse(
-            json.dumps({"error": str(e)}),
-            status_code=500,
-            mimetype="application/json"
-        )
-
-
-# Group Chat Endpoints
-@app.route(route="group-calendar/{calendar_id}/send-message", methods=["POST"])
-def send_group_message_function(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Endpoint to send a chat message to a group calendar.
-    Expects JSON body with 'userId' and 'message'.
-    """
-    calendar_id = req.route_params.get("calendar_id")
-    logger = logging.getLogger(__name__)
-    
-    try:
-        body = req.get_json()
-        user_id = body.get("userId")
-        message = body.get("message")
-        
-        if not user_id or not message:
-            return func.HttpResponse(
-                json.dumps({"error": "Missing userId or message in request body."}),
-                status_code=400,
-                mimetype="application/json"
-            )
-        
-        response, status_code = send_message_to_group(calendar_id, user_id, message)
-        return func.HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
-    except Exception as e:
-        logger.exception("Error in send_group_message endpoint: %s", str(e))
         return func.HttpResponse(
             json.dumps({"error": str(e)}),
             status_code=500,

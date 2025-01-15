@@ -1,17 +1,14 @@
-# app/calendar_routes.py
-
 import logging
 import json
 from datetime import datetime
 from typing import Tuple, List
 
-import requests
-from pydantic import ValidationError
 from azure.cosmos.exceptions import CosmosHttpResponseError
+from pydantic import ValidationError
 
 from app.database import calendars_container, events_container, user_container
 from app.models import Event, Calendar, CalendarColor
-from app.signalr_helper import SignalRHelper  # Import the helper class
+from app.notifications import send_email  # <-- import the helper
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -22,57 +19,8 @@ if not logger.hasHandlers():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-SIGNALR_CONNECTION_STRING = "Endpoint=Endpoint=https://calendifysignalr.service.signalr.net;AccessKey=6iJAASICah926Ieqzh78OB7bCTUaea0BN7TUOwvu1L9K7WVwOgpbJQQJ99BAACmepeSXJ3w3AAAAASRS8YAc;Version=1.0;"
-SIGNALR_HUB_NAME = "chat"  # Define your hub name
 
-signalr_helper = SignalRHelper(SIGNALR_CONNECTION_STRING)
-
-def send_message_to_group(calendar_id: str, sender_id: str, message: str) -> Tuple[dict, int]:
-    """
-    Sends a chat message to a group associated with the calendar.
-    
-    :param calendar_id: The ID of the calendar (used as group name).
-    :param sender_id: The user ID of the sender.
-    :param message: The message content.
-    :return: Tuple of response dict and status code.
-    """
-    logger.info(f"User '{sender_id}' sending message to group '{calendar_id}': {message}")
-    
-    # Fetch sender's username
-    try:
-        sender_query = list(user_container.query_items(
-            query="SELECT c.username FROM Users c WHERE c.userId = @userId",
-            parameters=[{"name": "@userId", "value": sender_id}],
-            enable_cross_partition_query=True
-        ))
-        if sender_query:
-            sender_username = sender_query[0]['username']
-        else:
-            sender_username = sender_id  # Fallback to userId if username not found
-    except CosmosHttpResponseError as e:
-        logger.exception(f"Error fetching username for userId '{sender_id}': {str(e)}")
-        sender_username = sender_id
-    
-    # Prepare the message payload
-    message_payload = {
-        "sender": sender_username,
-        "message": message,
-        "timestamp": datetime.utcnow().isoformat() + 'Z'
-    }
-    
-    # Send the message to the SignalR group
-    success, error = signalr_helper.send_to_group(
-        hub_name=SIGNALR_HUB_NAME,
-        group_name=calendar_id,  # Using calendar_id as the group name
-        message=message_payload
-    )
-    
-    if success:
-        return {"message": "Message sent successfully"}, 200
-    else:
-        return {"error": f"Failed to send message: {error}"}, 500
-
-def create_personal_calendar(user_id: str, name: str, color: str):
+def create_personal_calendar(user_id: str, name: str, color: str) -> Tuple[dict, int]:
     """
     create_personal_calendar:
     Creates a new calendar with isGroup=False and isDefault=False.
@@ -101,6 +49,7 @@ def create_personal_calendar(user_id: str, name: str, color: str):
     try:
         calendars_container.create_item(cal_item)
         logger.info("Personal calendar '%s' created with ID '%s' and color '%s'", name, personal_cal.calendarId, color)
+
         return {
             "message": "Personal calendar created successfully",
             "calendarId": personal_cal.calendarId
@@ -110,7 +59,8 @@ def create_personal_calendar(user_id: str, name: str, color: str):
         return {"error": str(e)}, 500
 
 
-def delete_personal_calendar(user_id: str, calendar_id: str):
+
+def delete_personal_calendar(user_id: str, calendar_id: str) -> Tuple[dict, int]:
     """
     delete_personal_calendar:
     Verifies that the calendar exists and that the requesting user is the owner.
@@ -160,6 +110,7 @@ def delete_personal_calendar(user_id: str, calendar_id: str):
     try:
         calendars_container.delete_item(item=cal_doc["id"], partition_key=calendar_id)
         logger.info("Calendar '%s' deleted successfully", calendar_id)
+
         return {"message": "Personal calendar deleted successfully"}, 200
     except CosmosHttpResponseError as e:
         logger.exception("Error deleting calendar '%s': %s", calendar_id, str(e))
@@ -264,7 +215,7 @@ def edit_group_calendar(calendar_id: str, admin_id: str, updated_data: dict) -> 
     
 def leave_group_calendar(calendar_id: str, user_id: str) -> Tuple[dict, int]:
     """
-    User can leave a group calendar. If the user is the owner, prevent leaving.
+    User can leave a group calendar. If the user is the owner, transfer ownership to the next member.
     """
     logger.info("User '%s' is attempting to leave group calendar '%s'", user_id, calendar_id)
 
@@ -276,7 +227,7 @@ def leave_group_calendar(calendar_id: str, user_id: str) -> Tuple[dict, int]:
             enable_cross_partition_query=True
         ))
         if not cal_query:
-            return {"error": "Calendar not found"}, 404
+            return {"error": "Calendar not found."}, 404
         cal_doc = cal_query[0]
     except CosmosHttpResponseError as e:
         logger.exception("Error fetching calendar '%s': %s", calendar_id, str(e))
@@ -284,15 +235,23 @@ def leave_group_calendar(calendar_id: str, user_id: str) -> Tuple[dict, int]:
 
     # 2) Check if it's a group calendar
     if not cal_doc.get("isGroup"):
-        return {"error": "Only group calendars can be left"}, 400
+        return {"error": "Only group calendars can be left."}, 400
 
     # 3) Check if the user is a member
     if user_id not in cal_doc.get("members", []):
-        return {"error": "User is not a member of this calendar"}, 400
+        return {"error": "User is not a member of this calendar."}, 400
 
-    # 4) Check if the user is the owner
+    # 4) If the user is the owner, transfer ownership
     if cal_doc.get("ownerId") == user_id:
-        return {"error": "Calendar owner cannot leave the calendar"}, 403
+        # Check if there are other members to transfer ownership
+        other_members = [m for m in cal_doc["members"] if m != user_id]
+        if not other_members:
+            return {"error": "Cannot leave the calendar as you are the only member."}, 400
+
+        # Assign the first member as the new owner
+        new_owner_id = other_members[0]
+        cal_doc["ownerId"] = new_owner_id
+        logger.info("Transferred ownership to user '%s' for group calendar '%s'", new_owner_id, calendar_id)
 
     # 5) Remove user from members list
     cal_doc["members"].remove(user_id)
@@ -301,7 +260,7 @@ def leave_group_calendar(calendar_id: str, user_id: str) -> Tuple[dict, int]:
     try:
         calendars_container.upsert_item(cal_doc)
         logger.info("User '%s' left group calendar '%s' successfully", user_id, calendar_id)
-        return {"message": "You have left the group calendar successfully"}, 200
+        return {"message": "You have left the group calendar successfully."}, 200
     except CosmosHttpResponseError as e:
         logger.exception("Error updating group calendar '%s' after user leave: %s", calendar_id, str(e))
         return {"error": str(e)}, 500
@@ -405,8 +364,6 @@ def has_time_conflict(existing_events: list, new_start: datetime, new_end: datet
     return False  # No overlap
 
 
-# app/calendar_routes.py
-
 def add_event(calendar_id: str, event_data: dict, user_id: str) -> Tuple[dict, int]:
     logger.info("Adding event to calendar %s by user %s", calendar_id, user_id)
 
@@ -496,6 +453,7 @@ def add_event(calendar_id: str, event_data: dict, user_id: str) -> Tuple[dict, i
                         username = member_query[0].get("username", member_id)
                     else:
                         username = member_id
+
                     busy_members_details.append({
                         "username": username,
                         "conflicting_event": event.get("title", "Unnamed Event"),
@@ -506,12 +464,15 @@ def add_event(calendar_id: str, event_data: dict, user_id: str) -> Tuple[dict, i
         if busy_members_details:
             error_message = "Cannot create event. The following user(s) are busy at the selected time:\n"
             for member in busy_members_details:
-                error_message += f"- {member['username']} during '{member['conflicting_event']}' from {member['startTime']} to {member['endTime']}.\n"
+                error_message += (
+                    f"- {member['username']} during '{member['conflicting_event']}' "
+                    f"from {member['startTime']} to {member['endTime']}.\n"
+                )
             logger.info(error_message)
             return {"error": error_message}, 409  # 409 Conflict
 
     # 4) Inject 'calendarId' into event_data
-    event_data['calendarId'] = calendar_id  # Add calendarId to event_data
+    event_data['calendarId'] = calendar_id
 
     # 5) Set 'creatorId' to 'user_id'
     event_data['creatorId'] = user_id
@@ -520,32 +481,49 @@ def add_event(calendar_id: str, event_data: dict, user_id: str) -> Tuple[dict, i
     try:
         new_event = Event(**event_data)  # Now calendarId and creatorId are included
 
-        # Serialize the Event object to JSON and then back to dict to ensure all fields are serializable
+        # Serialize the Event object to JSON and then back to dict
         event_json = new_event.json()
         item_dict = json.loads(event_json)
         item_dict["id"] = new_event.eventId  # Set 'id' for Cosmos
 
-        # Debug log to inspect the serialized item_dict
-        logger.debug("Serialized event data: %s", json.dumps(item_dict, indent=2))
-
         events_container.create_item(item_dict)
         logger.info("Event '%s' created in calendar '%s'", new_event.eventId, calendar_id)
+
+        # 7) ONLY after successful creation, send notifications if it's a group calendar
+        if cal_doc.get("isGroup"):
+            for member_id in cal_doc["members"]:
+                member_query = list(user_container.query_items(
+                    query="SELECT * FROM Users u WHERE u.userId = @userId",
+                    parameters=[{"name": "@userId", "value": member_id}],
+                    enable_cross_partition_query=True
+                ))
+                if member_query:
+                    member_doc = member_query[0]
+                    subject = f"New Event in Group Calendar '{cal_doc['name']}'"
+                    body_text = (
+                        f"Hello {member_doc['username']},\n\n"
+                        f"A new event '{new_event.title}' has been created in the group "
+                        f"calendar '{cal_doc['name']}'.\n"
+                        f"Start: {new_event.startTime}\n"
+                        f"End: {new_event.endTime}\n\n"
+                        "Best,\nCalendar App"
+                    )
+                    send_email(member_doc.get("email"), subject, body_text)
+
         return {"message": "Event created successfully", "eventId": new_event.eventId}, 201
 
     except ValidationError as ve:
-        # Specific handling for missing/invalid fields
         logger.warning("Validation error for event in calendar '%s': %s", calendar_id, ve)
         return {"error": str(ve)}, 422
 
     except CosmosHttpResponseError as e:
-        # Handle Cosmos DB specific errors
         logger.exception("Cosmos HTTP error while creating event: %s", str(e))
         return {"error": str(e)}, 500
 
     except Exception as e:
-        # Catch-all for other issues
         logger.exception("Error creating event in calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
+
 
 
 
@@ -586,7 +564,7 @@ def get_events(calendar_id: str, user_id: str):
         return {"error": str(e)}, 500
 
 
-def update_event(calendar_id: str, event_id: str, updated_data: dict, user_id: str):
+def update_event(calendar_id: str, event_id: str, updated_data: dict, user_id: str) -> Tuple[dict, int]:
     """
     Updates an existing event in a calendar.
     Ensures that the user is the creator of the event or has necessary permissions.
@@ -614,20 +592,26 @@ def update_event(calendar_id: str, event_id: str, updated_data: dict, user_id: s
             return {"error": "Only the creator can update this event"}, 403
 
         # Update fields
+        updated = False
         for key, value in updated_data.items():
             if key in event_doc and key not in ["eventId", "calendarId", "creatorId", "id"]:
                 event_doc[key] = value
+                updated = True
+
+        if not updated:
+            return {"error": "No valid fields to update"}, 400
 
         # Upsert the updated event
         events_container.upsert_item(event_doc)
         logger.info("Event '%s' updated successfully in calendar '%s'", event_id, calendar_id)
+
         return {"message": "Event updated successfully"}, 200
 
     except CosmosHttpResponseError as e:
         logger.exception("Error updating event '%s' in calendar '%s': %s", event_id, calendar_id, str(e))
         return {"error": str(e)}, 500
 
-def delete_event(calendar_id: str, event_id: str, user_id: str):
+def delete_event(calendar_id: str, event_id: str, user_id: str) -> Tuple[dict, int]:
     """
     Deletes an event from a calendar.
     Ensures that the user is the creator of the event or has necessary permissions.
@@ -657,6 +641,7 @@ def delete_event(calendar_id: str, event_id: str, user_id: str):
         # Delete the event
         events_container.delete_item(item=event_doc["id"], partition_key=calendar_id)
         logger.info("Event '%s' deleted successfully from calendar '%s'", event_id, calendar_id)
+
         return {"message": "Event deleted successfully"}, 200
 
     except CosmosHttpResponseError as e:
@@ -688,17 +673,19 @@ def get_user_id(username: str):
 
 def create_group_calendar(owner_id: str, name: str, members_usernames: list, color: str):
     """
-    Creates a new group calendar with specified members and color.
+    Creates a new group calendar with specified members (by username) and color.
+    Sends an email notification to all members added to the new group calendar.
     """
-    logger.info("Creating group calendar '%s' for owner '%s' with color '%s' and members %s", name, owner_id, color, members_usernames)
+    logger.info("Creating group calendar '%s' for owner '%s' with color '%s' and members %s",
+                name, owner_id, color, members_usernames)
 
-    # Define allowed colors excluding 'blue'
-    allowed_colors = [color.value for color in CalendarColor if color != CalendarColor.blue]
+    # Define allowed colors excluding 'blue' (modify as needed)
+    allowed_colors = [c.value for c in CalendarColor if c != CalendarColor.blue]
     if color not in allowed_colors:
         logger.warning("Invalid color '%s' for group calendar '%s'", color, name)
         return {"error": f"Invalid color. Allowed colors are: {', '.join(allowed_colors)}"}, 400
-    
-    # 1. Validate owner exists
+
+    # 1. Validate that the owner exists
     try:
         owner_query = list(user_container.query_items(
             query="SELECT * FROM Users u WHERE u.userId = @userId",
@@ -711,7 +698,7 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
     except CosmosHttpResponseError as e:
         logger.exception("Error fetching owner '%s': %s", owner_id, str(e))
         return {"error": str(e)}, 500
-    
+
     # 2. Map member usernames to userIds
     member_ids = []
     for username in members_usernames:
@@ -720,18 +707,17 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
             logger.warning("Member username '%s' does not exist.", username)
             return {"error": f"User '{username}' does not exist"}, 404
         member_ids.append(user_id)
-    
+
     # 3. Include owner in members if not already present
     if owner_id not in member_ids:
         member_ids.append(owner_id)
-    
-    # 4. Enforce maximum of 5 members
+
+    # 4. Enforce maximum of 5 members (adjust if needed)
     if len(member_ids) > 5:
-        logger.warning("Attempted to create group calendar with %d members. Maximum allowed is 5.", len(member_ids))
+        logger.warning("Attempted to create group calendar with %d members. Max allowed is 5.", len(member_ids))
         return {"error": "Cannot have more than 5 members in a group calendar"}, 400
-    
+
     # 5. Create the Calendar model
-    # Create the Calendar model
     group_cal = Calendar(
         name=name,
         ownerId=owner_id,
@@ -740,25 +726,50 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
         color=color
     )
     cal_item = group_cal.dict()
-    cal_item["id"] = group_cal.calendarId  # Cosmos 'id' fix
+    cal_item["id"] = group_cal.calendarId  # For Cosmos 'id' field
 
+    # 6. Save to Cosmos
     try:
         calendars_container.create_item(cal_item)
-        logger.info("Group calendar '%s' created with ID '%s' and color '%s'", name, group_cal.calendarId, color)
+        logger.info("Group calendar '%s' created with ID '%s' and color '%s'",
+                    name, group_cal.calendarId, color)
+
+        # 7. Send email notifications to each member
+        for member_id in member_ids:
+            user_query = list(user_container.query_items(
+                query="SELECT * FROM Users u WHERE u.userId = @userId",
+                parameters=[{"name": "@userId", "value": member_id}],
+                enable_cross_partition_query=True
+            ))
+            if user_query:
+                user_doc = user_query[0]
+                subject = f"You've been added to a new group calendar!"
+                body_text = (
+                    f"Hello {user_doc['username']},\n\n"
+                    f"You have been added to the new group calendar '{name}'.\n"
+                    f"Calendar ID: {group_cal.calendarId}\n\n"
+                    "Best,\nCalendar App"
+                )
+                send_email(user_doc.get("email"), subject, body_text)
+
         return {
             "message": "Group calendar created successfully",
             "calendarId": group_cal.calendarId
         }, 201
+
     except CosmosHttpResponseError as e:
         logger.exception("Error creating group calendar: %s", str(e))
         return {"error": str(e)}, 500
 
+
+
 def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     """
     Admin can add 'user_id' to the group calendar's members list.
-    We check if 'calendar_id' is a group calendar and if 'admin_id' is the owner.
+    Sends an email to the newly added user letting them know they've been added.
     """
-    logger.info("Admin '%s' is adding user '%s' to group calendar '%s'", admin_id, user_id, calendar_id)
+    logger.info("Admin '%s' is adding user '%s' to group calendar '%s'",
+                admin_id, user_id, calendar_id)
 
     # 1) Fetch the calendar doc
     try:
@@ -769,7 +780,6 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
         ))
         if not cal_query:
             return {"error": "Calendar not found"}, 404
-        
         cal_doc = cal_query[0]
     except CosmosHttpResponseError as e:
         logger.exception("Error fetching calendar '%s': %s", calendar_id, str(e))
@@ -778,14 +788,14 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     # 2) Check if it's a group calendar
     if not cal_doc.get("isGroup"):
         return {"error": "Cannot add user to a personal (non-group) calendar"}, 400
-    
-    # 3) Check if the admin_id matches ownerId
+
+    # 3) Check if the admin_id matches the calendar's ownerId
     if cal_doc.get("ownerId") != admin_id:
         return {"error": "Only the calendar owner can add members"}, 403
 
-    # 4) Add user_id to members list if not already there
+    # 4) Add user_id to members if not already there
     if user_id in cal_doc["members"]:
-        logger.info("User '%s' already in the members list", user_id)
+        logger.info("User '%s' is already in the members list", user_id)
         return {"message": "User already in group calendar"}, 200
     else:
         cal_doc["members"].append(user_id)
@@ -794,7 +804,27 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     try:
         calendars_container.upsert_item(cal_doc)
         logger.info("User '%s' added to group calendar '%s'", user_id, calendar_id)
-        return {"message": "User added successfully"}, 200
+
+        # Fetch the newly added user's info
+        new_user_query = list(user_container.query_items(
+            query="SELECT * FROM Users u WHERE u.userId = @userId",
+            parameters=[{"name": "@userId", "value": user_id}],
+            enable_cross_partition_query=True
+        ))
+        if new_user_query:
+            new_user_doc = new_user_query[0]
+            subject = "You've been added to a group calendar!"
+            body_text = (
+                f"Hello {new_user_doc['username']},\n\n"
+                f"You have been added to the group calendar '{cal_doc['name']}'.\n"
+                f"Calendar ID: {cal_doc['calendarId']}\n"
+                f"Added by Admin ID: {admin_id}\n\n"
+                "Best,\nCalendar App"
+            )
+            send_email(new_user_doc.get("email"), subject, body_text)
+
+        return {"message": "User added to group calendar successfully"}, 200
+
     except CosmosHttpResponseError as e:
         logger.exception("Error updating group calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
@@ -803,9 +833,10 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
 def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     """
     Admin can remove 'user_id' from the group calendar's members list.
-    We check if 'calendar_id' is a group calendar and if 'admin_id' is the owner.
+    Sends an email to that user letting them know they've been removed.
     """
-    logger.info("Admin '%s' removing user '%s' from group calendar '%s'", admin_id, user_id, calendar_id)
+    logger.info("Admin '%s' removing user '%s' from group calendar '%s'",
+                admin_id, user_id, calendar_id)
 
     # 1) Fetch calendar doc
     try:
@@ -816,7 +847,6 @@ def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: st
         ))
         if not cal_query:
             return {"error": "Calendar not found"}, 404
-        
         cal_doc = cal_query[0]
     except CosmosHttpResponseError as e:
         logger.exception("Error fetching calendar '%s': %s", calendar_id, str(e))
@@ -841,7 +871,77 @@ def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: st
     try:
         calendars_container.upsert_item(cal_doc)
         logger.info("User '%s' removed from group calendar '%s'", user_id, calendar_id)
+
+        # Send email to the removed user
+        removed_user_query = list(user_container.query_items(
+            query="SELECT * FROM Users u WHERE u.userId = @userId",
+            parameters=[{"name": "@userId", "value": user_id}],
+            enable_cross_partition_query=True
+        ))
+        if removed_user_query:
+            removed_user_doc = removed_user_query[0]
+            subject = "You've been removed from a group calendar"
+            body_text = (
+                f"Hello {removed_user_doc['username']},\n\n"
+                f"You have been removed from the group calendar '{cal_doc['name']}'.\n"
+                f"Calendar ID: {cal_doc['calendarId']}\n"
+                f"Removed by Admin ID: {admin_id}\n\n"
+                "Best,\nCalendar App"
+            )
+            send_email(removed_user_doc.get("email"), subject, body_text)
+
         return {"message": "User removed successfully"}, 200
+
     except CosmosHttpResponseError as e:
         logger.exception("Error removing user from group calendar '%s': %s", calendar_id, str(e))
+        return {"error": str(e)}, 500
+    
+def delete_group_calendar(calendar_id: str, admin_id: str) -> Tuple[dict, int]:
+    """
+    Deletes a group calendar. Only the owner (admin) can perform this action.
+    Deletes all associated events before deleting the calendar.
+    """
+    logger.info("Admin '%s' is attempting to delete group calendar '%s'", admin_id, calendar_id)
+
+    try:
+        # 1. Fetch the calendar document
+        cal_query = list(calendars_container.query_items(
+            query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
+            parameters=[{"name": "@calId", "value": calendar_id}],
+            enable_cross_partition_query=True
+        ))
+        if not cal_query:
+            return {"error": "Group calendar not found."}, 404
+
+        cal_doc = cal_query[0]
+
+        # 2. Verify ownership
+        if cal_doc.get("ownerId") != admin_id:
+            return {"error": "Only the calendar owner can delete the group calendar."}, 403
+
+        # 3. Delete all associated events
+        try:
+            events_query = list(events_container.query_items(
+                query="SELECT * FROM Events e WHERE e.calendarId = @calId",
+                parameters=[{"name": "@calId", "value": calendar_id}],
+                enable_cross_partition_query=True
+            ))
+            for event in events_query:
+                events_container.delete_item(item=event["id"], partition_key=calendar_id)
+            logger.info("All events associated with group calendar '%s' have been deleted.", calendar_id)
+        except CosmosHttpResponseError as e:
+            logger.exception("Error deleting events for group calendar '%s': %s", calendar_id, str(e))
+            return {"error": str(e)}, 500
+
+        # 4. Delete the calendar
+        try:
+            calendars_container.delete_item(item=cal_doc["id"], partition_key=calendar_id)
+            logger.info("Group calendar '%s' deleted successfully.", calendar_id)
+            return {"message": "Group calendar deleted successfully."}, 200
+        except CosmosHttpResponseError as e:
+            logger.exception("Error deleting group calendar '%s': %s", calendar_id, str(e))
+            return {"error": str(e)}, 500
+
+    except Exception as e:
+        logger.exception("Error in delete_group_calendar: %s", str(e))
         return {"error": str(e)}, 500

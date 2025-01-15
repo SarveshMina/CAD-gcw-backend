@@ -1,22 +1,23 @@
-# app/main.py
-
 from azure.functions import HttpRequest, HttpResponse
 import json
 import logging
 from pydantic import ValidationError
 
-from app.user_routes import register_user, login_user
+from app.user_routes import register_user, login_user, update_user_profile
 from app.calendar_routes import (
     add_event, get_events,
     create_group_calendar, add_user_to_group_calendar, remove_user_from_group_calendar,
     create_personal_calendar, delete_personal_calendar,
     update_event, delete_event, get_user_id, get_all_events_for_user,
-    edit_group_calendar, leave_group_calendar)
+    edit_group_calendar, leave_group_calendar,
+    delete_group_calendar
+)
 
 from app.models import User
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
 
 def register(req: HttpRequest) -> HttpResponse:
     try:
@@ -50,6 +51,25 @@ def login(req: HttpRequest) -> HttpResponse:
         logger.exception("Error in login endpoint: %s", str(e))
         return HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
+
+# Add the new user update handler
+def update_user_handler(req: HttpRequest) -> HttpResponse:
+    try:
+        user_id = req.route_params.get("user_id")
+        updates = req.get_json()
+        response, status_code = update_user_profile(user_id, updates)
+        return HttpResponse(
+            json.dumps(response),
+            status_code=status_code,
+            mimetype="application/json"
+        )
+    except Exception as e:
+        logger.exception("Error in update_user_handler: %s", str(e))
+        return HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
 
 def get_all_events_handler(req: HttpRequest, user_id: str) -> HttpResponse:
     """
@@ -347,3 +367,33 @@ def delete_personal(req: HttpRequest, calendar_id: str) -> HttpResponse:
     except Exception as e:
         logger.exception("Error in delete_personal endpoint: %s", str(e))
         return HttpResponse(str(e), status_code=500)
+    
+def delete_group_calendar_handler(req: HttpRequest, calendar_id: str) -> HttpResponse:
+    """
+    Handler to delete a group calendar.
+    Expects JSON body with 'adminId'.
+    """
+    try:
+        body = req.get_json()
+        admin_id = body.get("adminId")
+
+        if not admin_id:
+            return HttpResponse(
+                json.dumps({"error": "Missing adminId in request body."}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        response, status_code = remove_user_from_group_calendar(calendar_id, admin_id, admin_id)
+        if status_code == 200:
+            # Now delete the group calendar
+            response, status_code = delete_group_calendar(calendar_id, admin_id)
+        
+        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+    except Exception as e:
+        logger.exception("Error in delete_group_calendar_handler: %s", str(e))
+        return HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
