@@ -13,7 +13,13 @@ from dotenv import load_dotenv
 
 from app.database import user_container, calendars_container
 from app.models import User, Calendar
-from app.notifications import send_email, send_welcome_email, send_notification_email
+from app.notifications import (
+    send_email,
+    send_welcome_email,
+    send_notification_email,
+    send_login_notification,
+    send_password_reset_notification
+)
 
 load_dotenv()
 
@@ -21,8 +27,19 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def register_user(user_data: User):
-    logger.info("Received request to register user: %s", user_data.username)
+def register_user(user_data: User, client_ip: str, location: dict):
+    """
+    Registers a new user, creates a default calendar, and sends a welcome email.
+    
+    Args:
+        user_data (User): The user data.
+        client_ip (str): The IP address from which the registration request was made.
+        location (dict): Geolocation data derived from the IP address.
+    
+    Returns:
+        tuple: A tuple containing the response dictionary and HTTP status code.
+    """
+    logger.info("Received request to register user: %s from IP: %s", user_data.username, client_ip)
 
     # Validate username & password
     if not (5 <= len(user_data.username) <= 15):
@@ -91,6 +108,9 @@ def register_user(user_data: User):
         # Send "account created" email
         send_welcome_email(user_data.email, user_data.username)
 
+        # Optionally, send additional registration details with IP and location
+        # send_registration_notification(user_data.email, user_data.username, client_ip, location)
+
         return {
             "message": "User registered successfully",
             "userId": user_data.userId,
@@ -107,8 +127,20 @@ def register_user(user_data: User):
         return {"error": "An unexpected error occurred during registration."}, 500
 
 
-def login_user(username: str, password: str):
-    logger.info("Received login request for username: %s", username)
+def login_user(username: str, password: str, client_ip: str, location: dict):
+    """
+    Authenticates a user and sends a login notification email with IP and location.
+    
+    Args:
+        username (str): The username.
+        password (str): The password.
+        client_ip (str): The IP address from which the login request was made.
+        location (dict): Geolocation data derived from the IP address.
+    
+    Returns:
+        tuple: A tuple containing the response dictionary and HTTP status code.
+    """
+    logger.info("Received login request for username: %s from IP: %s", username, client_ip)
 
     try:
         user_query = list(
@@ -124,7 +156,16 @@ def login_user(username: str, password: str):
 
         user_doc = user_query[0]
         if bcrypt.checkpw(password.encode("utf-8"), user_doc["password"].encode("utf-8")):
-            logger.info("User '%s' logged in successfully", username)
+            logger.info("User '%s' logged in successfully from IP: %s", username, client_ip)
+            
+            # Send login notification email with IP and location
+            send_login_notification(
+                to_email=user_doc["email"],
+                username=user_doc["username"],
+                ip_address=client_ip,
+                location=location
+            )
+            
             return {
                 "message": "Login successful",
                 "userId": user_doc["userId"],
@@ -144,7 +185,14 @@ def login_user(username: str, password: str):
 
 def update_user_profile(user_id: str, updates: dict):
     """
-    Allows updating username, email, or password. Sends an email if successful.
+    Allows updating username, email, or password. Sends a profile update email if successful.
+    
+    Args:
+        user_id (str): The user's unique identifier.
+        updates (dict): A dictionary containing fields to update.
+    
+    Returns:
+        tuple: A tuple containing the response dictionary and HTTP status code.
     """
     logger.info("User '%s' requested profile update.", user_id)
     try:
@@ -225,7 +273,7 @@ def update_user_profile(user_id: str, updates: dict):
             f"Hello {user_doc['username']},\n\n"
             "Your profile details have been updated successfully.\n"
             "If you did not make this change, please contact support immediately.\n\n"
-            "Best,\nCalendar App"
+            "Best,\nCalendify Team"
         )
         send_email(user_doc["email"], subject, body_text)
 
@@ -247,6 +295,12 @@ def generate_otp(length=6):
 def forgot_password_request(req):
     """
     Handles the forgot password request. Generates and sends an OTP to the user's email.
+    
+    Args:
+        req (HttpRequest): The HTTP request containing the email.
+    
+    Returns:
+        HttpResponse: The HTTP response indicating success or failure.
     """
     try:
         req_body = req.get_json()
@@ -290,9 +344,17 @@ def forgot_password_request(req):
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 
-def reset_password(req):
+def reset_password(req, client_ip: str, location: dict):
     """
-    Handles password reset after OTP verification.
+    Handles password reset after OTP verification and sends a notification email with IP and location.
+    
+    Args:
+        req (HttpRequest): The HTTP request containing email, OTP, and new password.
+        client_ip (str): The IP address from which the reset request was made.
+        location (dict): Geolocation data derived from the IP address.
+    
+    Returns:
+        HttpResponse: The HTTP response indicating success or failure.
     """
     try:
         req_body = req.get_json()
@@ -343,18 +405,19 @@ def reset_password(req):
 
         user_container.upsert_item(user_doc)
 
-        # Optionally, send a confirmation email about password reset
-        subject = "Your Password Has Been Reset"
-        body_text = (
-            f"Hello {user_doc['username']},\n\n"
-            "Your password has been successfully reset.\n\n"
-            "If you did not perform this action, please contact our support team immediately.\n\n"
-            "Best regards,\nCalendar App"
+        # Send a confirmation email about password reset, including IP and location
+        send_password_reset_notification(
+            to_email=user_doc["email"],
+            username=user_doc["username"],
+            ip_address=client_ip,
+            location=location
         )
-        send_email(user_doc["email"], subject, body_text)
 
         return func.HttpResponse(json.dumps({"message": "Password reset successful"}), status_code=200, mimetype="application/json")
 
+    except CosmosHttpResponseError as e:
+        logger.exception("Cosmos HTTP error during password reset for user '%s': %s", email, str(e))
+        return func.HttpResponse(json.dumps({"error": f"(BadRequest) {str(e)}"}), status_code=500, mimetype="application/json")
     except Exception as e:
-        logger.exception("Error in reset_password: %s", str(e))
-        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
+        logger.exception("Unexpected error during password reset for user '%s': %s", email, str(e))
+        return func.HttpResponse(json.dumps({"error": "An unexpected error occurred during password reset."}), status_code=500, mimetype="application/json")

@@ -12,7 +12,11 @@ from app.main import (
     update_user_handler, delete_group_calendar_handler
 )
 
+from app.utils import get_client_ip, get_geolocation
 from app.calendar_routes import import_internet_calendar
+from pydantic import ValidationError
+from app.user_routes import login_user, register_user
+from app.models import User
 
 
 import logging
@@ -34,11 +38,54 @@ app = func.FunctionApp()
 
 @app.route(route="register", methods=["POST"])
 def register_function(req: func.HttpRequest) -> func.HttpResponse:
-    return register(req)
+    from app.user_routes import register_user
+    try:
+        req_body = req.get_json()
+        user = User(**req_body)
+        
+        # Extract client IP and geolocation
+        client_ip = get_client_ip(req)
+        location = get_geolocation(client_ip)
+        
+        # Pass IP and location to register_user if needed
+        response, status_code = register_user(user, client_ip, location)
+        return func.HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+    except ValidationError as ve:
+        logger.exception("Validation error in register endpoint: %s", str(ve))
+        return func.HttpResponse(json.dumps({"error": str(ve)}), status_code=422, mimetype="application/json")
+    except Exception as e:
+        logger.exception("Error in register endpoint: %s", str(e))
+        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
+
 
 @app.route(route="login", methods=["POST"])
 def login_function(req: func.HttpRequest) -> func.HttpResponse:
-    return login(req)
+    from app.user_routes import login_user
+    try:
+        req_body = req.get_json()
+        username = req_body.get("username")
+        password = req_body.get("password")
+
+        if not username or not password:
+            return func.HttpResponse(
+                json.dumps({"error": "Missing credentials"}),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        # Extract client IP and geolocation
+        client_ip = get_client_ip(req)
+        location = get_geolocation(client_ip)
+        
+        # Pass IP and location to login_user
+        response, status_code = login_user(username, password, client_ip, location)
+        return func.HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+    except ValidationError as ve:
+        logger.exception("Validation error in login endpoint: %s", str(ve))
+        return func.HttpResponse(json.dumps({"error": str(ve)}), status_code=422, mimetype="application/json")
+    except Exception as e:
+        logger.exception("Error in login endpoint: %s", str(e))
+        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
 
 @app.route(route="user/{user_id}/profile", methods=["GET"])
 def get_user_profile(req: func.HttpRequest) -> func.HttpResponse:
@@ -192,7 +239,21 @@ def forgot_password_function(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="reset-password", methods=["POST"])
 def reset_password_function(req: func.HttpRequest) -> func.HttpResponse:
     from app.user_routes import reset_password
-    return reset_password(req)
+    try:
+        # Extract client IP and geolocation
+        client_ip = get_client_ip(req)
+        location = get_geolocation(client_ip)
+        
+        # Pass IP and location to reset_password
+        return reset_password(req, client_ip, location)
+    except Exception as e:
+        logger.exception("Error in reset_password_handler: %s", str(e))
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
 
 
 @app.route(route="personal-calendar/{calendar_id}/edit", methods=["PUT"])

@@ -414,6 +414,7 @@ def import_calendar(req: HttpRequest) -> HttpResponse:
         body = req.get_json()
         user_id = body.get("userId")
         ical_url = body.get("iCalURL")
+        
 
         if not user_id or not ical_url:
             return HttpResponse(
