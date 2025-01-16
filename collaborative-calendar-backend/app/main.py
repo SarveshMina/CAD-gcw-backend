@@ -2,6 +2,7 @@ from azure.functions import HttpRequest, HttpResponse
 import json
 import logging
 from pydantic import ValidationError
+import azure.functions as func
 
 from app.user_routes import register_user, login_user, update_user_profile
 from app.calendar_routes import (
@@ -10,7 +11,7 @@ from app.calendar_routes import (
     create_personal_calendar, delete_personal_calendar,
     update_event, delete_event, get_user_id, get_all_events_for_user,
     edit_group_calendar, leave_group_calendar,
-    delete_group_calendar
+    delete_group_calendar, import_internet_calendar
 )
 
 from app.models import User
@@ -378,7 +379,7 @@ def delete_group_calendar_handler(req: HttpRequest, calendar_id: str) -> HttpRes
         admin_id = body.get("adminId")
 
         if not admin_id:
-            return HttpResponse(
+            return func.HttpResponse(
                 json.dumps({"error": "Missing adminId in request body."}),
                 status_code=400,
                 mimetype="application/json"
@@ -389,9 +390,47 @@ def delete_group_calendar_handler(req: HttpRequest, calendar_id: str) -> HttpRes
             # Now delete the group calendar
             response, status_code = delete_group_calendar(calendar_id, admin_id)
         
-        return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
+        return func.HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in delete_group_calendar_handler: %s", str(e))
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
+
+    
+
+def import_calendar(req: HttpRequest) -> HttpResponse:
+    """
+    Handler to import an internet calendar (iCal feed) for a user.
+    Expects JSON body with:
+    - userId: str
+    - iCalURL: str
+    """
+    try:
+        body = req.get_json()
+        user_id = body.get("userId")
+        ical_url = body.get("iCalURL")
+
+        if not user_id or not ical_url:
+            return HttpResponse(
+                json.dumps({"error": "Missing userId or iCalURL in request body."}),
+                status_code=400,
+                mimetype="application/json"
+            )
+
+        response, status_code = import_internet_calendar(user_id, ical_url)
+        return HttpResponse(
+            json.dumps(response),
+            status_code=status_code,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logger.exception("Error in import_calendar handler: %s", str(e))
         return HttpResponse(
             json.dumps({"error": str(e)}),
             status_code=500,

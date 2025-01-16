@@ -1,6 +1,9 @@
 import logging
 import json
+import requests
 from datetime import datetime
+from icalendar import Calendar as ICalCalendar, Event as ICalEvent
+from app.models import Event
 from typing import Tuple, List
 
 from azure.cosmos.exceptions import CosmosHttpResponseError
@@ -8,7 +11,7 @@ from pydantic import ValidationError
 
 from app.database import calendars_container, events_container, user_container
 from app.models import Event, Calendar, CalendarColor
-from app.notifications import send_email  # <-- import the helper
+from app.notifications import send_notification_email
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -22,14 +25,12 @@ if not logger.hasHandlers():
 
 def create_personal_calendar(user_id: str, name: str, color: str) -> Tuple[dict, int]:
     """
-    create_personal_calendar:
-    Creates a new calendar with isGroup=False and isDefault=False.
-    Associates the calendar with the user by setting ownerId and including the user in members.
+    Creates a new personal calendar with the specified name and color.
     """
     logger.info("Creating personal calendar '%s' for user '%s' with color '%s'", name, user_id, color)
 
-    # Define allowed colors excluding 'blue'
-    allowed_colors = [color.value for color in CalendarColor if color != CalendarColor.blue]
+    # Define allowed colors including 'blue'
+    allowed_colors = [color.value for color in CalendarColor]
     if color not in allowed_colors:
         logger.warning("Invalid color '%s' for calendar '%s'", color, name)
         return {"error": f"Invalid color. Allowed colors are: {', '.join(allowed_colors)}"}, 400
@@ -57,6 +58,7 @@ def create_personal_calendar(user_id: str, name: str, color: str) -> Tuple[dict,
     except CosmosHttpResponseError as e:
         logger.exception("Error creating personal calendar: %s", str(e))
         return {"error": str(e)}, 500
+
 
 
 
@@ -145,12 +147,13 @@ def get_user_calendars(user_id: str) -> Tuple[dict, int]:
                 else:
                     member_usernames.append(member_id)  # Fallback to userId if username not found
             cal["memberUsernames"] = member_usernames
+            # Ensure 'isGroup' is present
+            cal["isGroup"] = cal.get("isGroup", False)
         
         return {"calendars": calendars_query}, 200
     except CosmosHttpResponseError as e:
         logger.exception("Error fetching user calendars: %s", str(e))
         return {"error": "Failed to fetch user calendars."}, 500
-
 
 
 def edit_group_calendar(calendar_id: str, admin_id: str, updated_data: dict) -> Tuple[dict, int]:
@@ -502,13 +505,12 @@ def add_event(calendar_id: str, event_data: dict, user_id: str) -> Tuple[dict, i
                     subject = f"New Event in Group Calendar '{cal_doc['name']}'"
                     body_text = (
                         f"Hello {member_doc['username']},\n\n"
-                        f"A new event '{new_event.title}' has been created in the group "
+                        f"\nA new event '{new_event.title}' has been created in the group "
                         f"calendar '{cal_doc['name']}'.\n"
                         f"Start: {new_event.startTime}\n"
                         f"End: {new_event.endTime}\n\n"
-                        "Best,\nCalendar App"
                     )
-                    send_email(member_doc.get("email"), subject, body_text)
+                    send_notification_email(member_doc.get("email"), subject, body_text)
 
         return {"message": "Event created successfully", "eventId": new_event.eventId}, 201
 
@@ -746,11 +748,10 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
                 subject = f"You've been added to a new group calendar!"
                 body_text = (
                     f"Hello {user_doc['username']},\n\n"
-                    f"You have been added to the new group calendar '{name}'.\n"
+                    f"\nYou have been added to the new group calendar '{name}'.\n"
                     f"Calendar ID: {group_cal.calendarId}\n\n"
-                    "Best,\nCalendar App"
                 )
-                send_email(user_doc.get("email"), subject, body_text)
+                send_notification_email(user_doc.get("email"), subject, body_text)
 
         return {
             "message": "Group calendar created successfully",
@@ -816,12 +817,11 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
             subject = "You've been added to a group calendar!"
             body_text = (
                 f"Hello {new_user_doc['username']},\n\n"
-                f"You have been added to the group calendar '{cal_doc['name']}'.\n"
+                f"\nYou have been added to the group calendar '{cal_doc['name']}'.\n"
                 f"Calendar ID: {cal_doc['calendarId']}\n"
                 f"Added by Admin ID: {admin_id}\n\n"
-                "Best,\nCalendar App"
             )
-            send_email(new_user_doc.get("email"), subject, body_text)
+            send_notification_email(new_user_doc.get("email"), subject, body_text)
 
         return {"message": "User added to group calendar successfully"}, 200
 
@@ -883,12 +883,11 @@ def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: st
             subject = "You've been removed from a group calendar"
             body_text = (
                 f"Hello {removed_user_doc['username']},\n\n"
-                f"You have been removed from the group calendar '{cal_doc['name']}'.\n"
+                f"\nYou have been removed from the group calendar '{cal_doc['name']}'.\n"
                 f"Calendar ID: {cal_doc['calendarId']}\n"
                 f"Removed by Admin ID: {admin_id}\n\n"
-                "Best,\nCalendar App"
             )
-            send_email(removed_user_doc.get("email"), subject, body_text)
+            send_notification_email(removed_user_doc.get("email"), subject, body_text)
 
         return {"message": "User removed successfully"}, 200
 
@@ -944,4 +943,166 @@ def delete_group_calendar(calendar_id: str, admin_id: str) -> Tuple[dict, int]:
 
     except Exception as e:
         logger.exception("Error in delete_group_calendar: %s", str(e))
+        return {"error": str(e)}, 500
+    
+# calendar_routes.py
+
+def import_internet_calendar(user_id: str, ical_url: str, name: str, color: str) -> Tuple[dict, int]:
+    """
+    Imports an internet calendar from an iCal URL into a new personal calendar.
+    """
+    logger.info("Importing internet calendar for user '%s' from URL '%s'", user_id, ical_url)
+
+    # 1. Validate the user exists
+    try:
+        user_query = list(user_container.query_items(
+            query="SELECT * FROM Users u WHERE u.userId = @userId",
+            parameters=[{"name": "@userId", "value": user_id}],
+            enable_cross_partition_query=True
+        ))
+        if not user_query:
+            logger.warning("User '%s' does not exist.", user_id)
+            return {"error": "User does not exist."}, 404
+    except CosmosHttpResponseError as e:
+        logger.exception("Error fetching user '%s': %s", user_id, str(e))
+        return {"error": str(e)}, 500
+
+    # 2. Fetch the iCal data from the URL
+    try:
+        response = requests.get(ical_url)
+        if response.status_code != 200:
+            logger.warning("Failed to fetch iCal data. Status code: %s", response.status_code)
+            return {"error": "Failed to fetch iCal data from the provided URL."}, 400
+
+        ical_data = response.content
+        ical_calendar = ICalCalendar.from_ical(ical_data)
+    except Exception as e:
+        logger.exception("Error fetching or parsing iCal data: %s", str(e))
+        return {"error": "Invalid iCal URL or data."}, 400
+
+    # 3. Extract calendar name from iCal data or use provided name
+    calendar_name = name.strip() if name else str(ical_calendar.get('X-WR-CALNAME', 'Imported Calendar'))
+
+    # 4. Create a new personal calendar with the specified color
+    try:
+        response_body, status_code = create_personal_calendar(user_id, calendar_name, color)
+
+        if status_code != 201:
+            logger.error("Failed to create personal calendar: %s", response_body.get("error", "Unknown error"))
+            return response_body, status_code
+
+        new_calendar_id = response_body.get("calendarId")
+    except Exception as e:
+        logger.exception("Error creating personal calendar: %s", str(e))
+        return {"error": "Failed to create personal calendar."}, 500
+
+    # 5. Iterate through each event in the iCal data and add to the new calendar
+    imported_events = []
+    try:
+        for component in ical_calendar.walk():
+            if component.name == "VEVENT":
+                event_title = str(component.get('SUMMARY', 'No Title'))
+                event_description = str(component.get('DESCRIPTION', ''))
+                event_start = component.get('DTSTART').dt
+                event_end = component.get('DTEND').dt
+
+                # Ensure datetime objects
+                if isinstance(event_start, datetime) and isinstance(event_end, datetime):
+                    # Create Event model instance
+                    new_event = Event(
+                        calendarId=new_calendar_id,
+                        title=event_title,
+                        description=event_description,
+                        startTime=event_start,
+                        endTime=event_end,
+                        creatorId=user_id
+                    )
+
+                    # Serialize to JSON and back to dict for Cosmos DB
+                    event_json = new_event.json()
+                    event_dict = json.loads(event_json)
+                    event_dict["id"] = new_event.eventId  # Cosmos 'id' field
+
+                    # Insert the event into Cosmos DB
+                    events_container.create_item(event_dict)
+                    imported_events.append(new_event.eventId)
+
+        logger.info("Imported %d events into calendar '%s'", len(imported_events), new_calendar_id)
+        return {
+            "message": f"Calendar imported successfully with {len(imported_events)} events.",
+            "calendarId": new_calendar_id,
+            "importedEventIds": imported_events
+        }, 201
+
+    except ValidationError as ve:
+        logger.warning("Validation error while importing events: %s", str(ve))
+        return {"error": f"Validation error: {str(ve)}"}, 422
+
+    except CosmosHttpResponseError as ce:
+        logger.exception("Cosmos DB error while importing events: %s", str(ce))
+        return {"error": str(ce)}, 500
+
+    except Exception as e:
+        logger.exception("Unexpected error while importing calendar events: %s", str(e))
+        return {"error": "Failed to import calendar events."}, 500
+
+    
+def edit_personal_calendar(calendar_id: str, user_id: str, updated_data: dict) -> Tuple[dict, int]:
+    """
+    Edit a personal calendar's name and color.
+    Only the owner can perform this action.
+    """
+    logger.info("User '%s' is editing personal calendar '%s'", user_id, calendar_id)
+    
+    try:
+        # Fetch the calendar document
+        cal_query = list(calendars_container.query_items(
+            query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
+            parameters=[{"name": "@calId", "value": calendar_id}],
+            enable_cross_partition_query=True
+        ))
+        if not cal_query:
+            return {"error": "Calendar not found"}, 404
+        cal_doc = cal_query[0]
+        
+        # Check if it's a personal calendar
+        if cal_doc.get("isGroup"):
+            return {"error": "Only personal calendars can be edited with this endpoint"}, 400
+        
+        # Check if the user is the owner
+        if cal_doc.get("ownerId") != user_id:
+            return {"error": "Only the calendar owner can edit this calendar"}, 403
+        
+        # Update name and/or color
+        updated = False
+        allowed_colors = [color.value for color in CalendarColor]
+        
+        if "name" in updated_data:
+            new_name = updated_data["name"].strip()
+            if not new_name:
+                return {"error": "Calendar name cannot be empty"}, 400
+            cal_doc["name"] = new_name
+            updated = True
+        
+        if "color" in updated_data:
+            new_color = updated_data["color"]
+            if new_color not in allowed_colors:
+                logger.warning("Invalid color '%s' for calendar '%s'", new_color, calendar_id)
+                return {"error": f"Invalid color. Allowed colors are: {', '.join(allowed_colors)}"}, 400
+            cal_doc["color"] = new_color
+            updated = True
+        
+        if not updated:
+            return {"error": "No valid fields to update"}, 400
+        
+        # Upsert the updated calendar
+        calendars_container.upsert_item(cal_doc)
+        logger.info("Personal calendar '%s' updated successfully", calendar_id)
+        return {"message": "Personal calendar updated successfully"}, 200
+        
+    except CosmosHttpResponseError as e:
+        logger.exception("Error updating personal calendar '%s': %s", calendar_id, str(e))
+        return {"error": str(e)}, 500
+    except Exception as e:
+        logger.exception("Unexpected error editing personal calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
