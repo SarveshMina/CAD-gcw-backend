@@ -16,9 +16,9 @@ from app.models import User, Calendar
 from app.notifications import (
     send_email,
     send_welcome_email,
-    send_notification_email,
     send_login_notification,
-    send_password_reset_notification
+    send_password_reset_notification,
+    send_notification_email
 )
 
 load_dotenv()

@@ -1,6 +1,6 @@
 # app/models.py
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
 import uuid
 from datetime import datetime
@@ -12,7 +12,7 @@ from enum import Enum  # Import Enum
 class User(BaseModel):
     username: str  # e.g., "johndoe"
     password: str  # hashed password
-    email: Optional[str] = None  # optional field
+    email: EmailStr  # using Pydantic's EmailStr for validation
     userId: str = Field(default_factory=lambda: str(uuid.uuid4()))  # unique identifier for the user
     calendars: List[str] = []  # store calendarIds the user has
     default_calendar_id: str = ""  # store the default calendarId for the user
@@ -61,3 +61,4 @@ class Event(BaseModel):
         json_encoders = {
             datetime: lambda v: v.replace(second=0, microsecond=0).isoformat()
         }
+
