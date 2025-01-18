@@ -12,6 +12,7 @@ from app.main import (
     update_user_handler, delete_group_calendar_handler
 )
 
+from app.user_routes import google_oauth_login
 from app.utils import get_client_ip, get_geolocation
 from app.calendar_routes import import_internet_calendar
 from pydantic import ValidationError
@@ -321,6 +322,49 @@ def import_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
 
     except Exception as e:
         logger.exception("Error in import_calendar_function: %s", str(e))
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+    
+@app.route(route="auth/google", methods=["POST"])
+def google_auth_function(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Expects JSON body with 'idToken' (the token from Google).
+    Verifies the token, then logs in or registers the user.
+    """
+    import json
+    import logging
+    
+    logger = logging.getLogger(__name__)
+
+    try:
+        body = req.get_json()
+        id_token_str = body.get("idToken")
+
+        if not id_token_str:
+            return func.HttpResponse(
+                json.dumps({"error": "Missing idToken in request body."}),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        # Optionally capture client IP & location
+        client_ip = get_client_ip(req)
+        location = get_geolocation(client_ip)
+
+        # Call your user_routes logic to verify token and handle upsert
+        response, status_code = google_oauth_login(id_token_str, client_ip, location)
+        
+        return func.HttpResponse(
+            json.dumps(response),
+            status_code=status_code,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logger.exception("Error in google_auth_function: %s", str(e))
         return func.HttpResponse(
             json.dumps({"error": str(e)}),
             status_code=500,

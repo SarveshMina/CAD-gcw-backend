@@ -11,6 +11,9 @@ import azure.functions as func
 import os
 from dotenv import load_dotenv
 
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+
 from app.database import user_container, calendars_container
 from app.models import User, Calendar
 from app.notifications import (
@@ -158,12 +161,15 @@ def login_user(username: str, password: str, client_ip: str, location: dict):
         if bcrypt.checkpw(password.encode("utf-8"), user_doc["password"].encode("utf-8")):
             logger.info("User '%s' logged in successfully from IP: %s", username, client_ip)
             
+            # Use the actual location data
+            # location = "get_geolocation(client_ip)"  # Removed
+            
             # Send login notification email with IP and location
             send_login_notification(
                 to_email=user_doc["email"],
                 username=user_doc["username"],
                 ip_address=client_ip,
-                location=location
+                location=location  # Ensure this is a dict
             )
             
             return {
@@ -181,6 +187,7 @@ def login_user(username: str, password: str, client_ip: str, location: dict):
     except Exception as e:
         logger.exception("Unexpected error during login for user '%s': %s", username, str(e))
         return {"error": "An unexpected error occurred during login."}, 500
+
 
 
 def update_user_profile(user_id: str, updates: dict):
@@ -410,7 +417,7 @@ def reset_password(req, client_ip: str, location: dict):
             to_email=user_doc["email"],
             username=user_doc["username"],
             ip_address=client_ip,
-            location=location
+            location=location  # Ensure this is a dict
         )
 
         return func.HttpResponse(json.dumps({"message": "Password reset successful"}), status_code=200, mimetype="application/json")
@@ -421,3 +428,120 @@ def reset_password(req, client_ip: str, location: dict):
     except Exception as e:
         logger.exception("Unexpected error during password reset for user '%s': %s", email, str(e))
         return func.HttpResponse(json.dumps({"error": "An unexpected error occurred during password reset."}), status_code=500, mimetype="application/json")
+
+
+def google_oauth_login(id_token_str: str, client_ip: str, location: dict):
+    """
+    Verifies the Google ID token. If valid, logs in or registers the user.
+    Returns (response_dict, status_code).
+    """
+    try:
+        # Verify the token with Google's servers
+        # This will raise ValueError if the token is invalid
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        idinfo = id_token.verify_oauth2_token(
+            id_token_str, 
+            google_requests.Request(), 
+            google_client_id
+        )
+        
+        # If successful, idinfo should contain keys like:
+        # 'iss', 'sub', 'email', 'email_verified', 'name', 'picture', etc.
+        
+        google_id = idinfo.get("sub")
+        email = idinfo.get("email")
+        name = idinfo.get("name", "")  # optional
+        # You could also get the user's first/last name from "given_name"/"family_name" if needed
+
+        if not email or not google_id:
+            return {"error": "Invalid Google token: missing email or sub"}, 400
+
+        # 1. Check if a user with googleId=<google_id> or email=<email> already exists
+        user_query = list(
+            user_container.query_items(
+                query="""
+                    SELECT * FROM Users u 
+                     WHERE (u.googleId = @googleId) OR (u.email = @email)
+                """,
+                parameters=[
+                    {"name": "@googleId", "value": google_id},
+                    {"name": "@email", "value": email}
+                ],
+                enable_cross_partition_query=True
+            )
+        )
+
+        if user_query:
+            # Existing user -> "Login successful"
+            user_doc = user_query[0]
+            return {
+                "message": "Login successful (Google OAuth)",
+                "userId": user_doc["userId"],
+                "default_calendar_id": user_doc.get("default_calendar_id", "")
+                # ... add whatever else you want (maybe an auth token)
+            }, 200
+        else:
+            # No user -> "Register" a new user with googleId, no password
+            # For consistency, we can do something similar to register_user
+            # but a simpler version since password is empty or irrelevant.
+            new_user = User(
+                username=create_unique_username_from_email(email), 
+                password="",  # no password
+                email=email,
+                googleId=google_id
+            )
+            
+            # We also create them in DB; do the same steps as in register_user
+            new_user_item = new_user.dict()
+            new_user_item["id"] = new_user_item["userId"]  # for Cosmos DB
+
+            # Insert into user_container
+            user_container.create_item(body=new_user_item)
+
+            # Optionally, create a default/home calendar (like register_user does)
+            home_cal = Calendar(
+                name=f"{new_user.username}'s Home Calendar",
+                ownerId=new_user.userId,
+                isGroup=False,
+                isDefault=True,
+                members=[new_user.userId],
+                color="blue"
+            )
+            home_cal_dict = home_cal.dict()
+            home_cal_dict["id"] = home_cal.calendarId
+
+            calendars_container.create_item(body=home_cal_dict)
+
+            # Update user doc with references
+            new_user.calendars.append(home_cal.calendarId)
+            new_user.default_calendar_id = home_cal.calendarId
+            user_container.upsert_item(new_user.dict())
+
+            # Optionally send "Welcome" email
+            send_welcome_email(new_user.email, new_user.username)
+
+            return {
+                "message": "User registered successfully via Google OAuth",
+                "userId": new_user.userId,
+                "homeCalendarId": home_cal.calendarId
+            }, 201
+
+    except ValueError:
+        # Invalid token
+        return {"error": "Invalid Google ID token"}, 401
+    except Exception as e:
+        logger.exception("Error in google_oauth_login: %s", str(e))
+        return {"error": "An unexpected error occurred with Google OAuth."}, 500
+
+
+def create_unique_username_from_email(email: str) -> str:
+    """
+    A simple helper that tries to create a unique username from the email address.
+    e.g., "johndoe@gmail.com" -> "johndoe"
+    If that username is taken, append random digits, etc.
+    """
+    base_username = email.split("@")[0]
+    # e.g. strip out invalid characters, ensure length constraints, etc.
+    # Then check DB if it exists. If it does, append random digits until unique.
+    # For brevity, we'll just return the base for now.
+    return base_username

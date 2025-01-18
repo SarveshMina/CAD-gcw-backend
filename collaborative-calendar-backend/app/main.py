@@ -24,7 +24,9 @@ def register(req: HttpRequest) -> HttpResponse:
     try:
         req_body = req.get_json()
         user = User(**req_body)
-        response, status_code = register_user(user)
+        client_ip = req.headers.get("X-Forwarded-For", req.headers.get("REMOTE_ADDR", ""))
+        location = req.url
+        response, status_code = register_user(user, client_ip, location)
         return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except ValidationError as ve:
         logger.exception("Validation error in register endpoint: %s", str(ve))
@@ -38,6 +40,7 @@ def login(req: HttpRequest) -> HttpResponse:
         req_body = req.get_json()
         username = req_body.get("username")
         password = req_body.get("password")
+        client_ip = req.headers.get("X-Forwarded-For", req.headers.get("REMOTE_ADDR", ""))
 
         if not username or not password:
             return HttpResponse(
@@ -46,7 +49,7 @@ def login(req: HttpRequest) -> HttpResponse:
                 mimetype="application/json"
             )
 
-        response, status_code = login_user(username, password)
+        response, status_code = login_user(username, password, client_ip, location="req.url")
         return HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except Exception as e:
         logger.exception("Error in login endpoint: %s", str(e))
@@ -71,6 +74,7 @@ def update_user_handler(req: HttpRequest) -> HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
+    
 
 def get_all_events_handler(req: HttpRequest, user_id: str) -> HttpResponse:
     """
@@ -414,6 +418,8 @@ def import_calendar(req: HttpRequest) -> HttpResponse:
         body = req.get_json()
         user_id = body.get("userId")
         ical_url = body.get("iCalURL")
+        color = body.get("color", "pink")  # or your desired default color
+        name = body.get("name", "Imported Calendar")  # or your desired default name
         
 
         if not user_id or not ical_url:
@@ -423,7 +429,7 @@ def import_calendar(req: HttpRequest) -> HttpResponse:
                 mimetype="application/json"
             )
 
-        response, status_code = import_internet_calendar(user_id, ical_url)
+        response, status_code = import_internet_calendar(user_id, ical_url, name, color)
         return HttpResponse(
             json.dumps(response),
             status_code=status_code,

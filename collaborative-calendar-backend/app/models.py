@@ -11,11 +11,15 @@ from enum import Enum  # Import Enum
 # -----------------------
 class User(BaseModel):
     username: str  # e.g., "johndoe"
-    password: str  # hashed password
+    password: Optional[str] = ""  # hashed password or empty if using Google OAuth
     email: EmailStr  # using Pydantic's EmailStr for validation
     userId: str = Field(default_factory=lambda: str(uuid.uuid4()))  # unique identifier for the user
     calendars: List[str] = []  # store calendarIds the user has
     default_calendar_id: str = ""  # store the default calendarId for the user
+    googleId: Optional[str] = ""  # Google OAuth ID
+
+    class Config:
+        allow_population_by_field_name = True
 
 # -----------------------
 # Calendar Color Enum
