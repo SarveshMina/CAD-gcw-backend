@@ -60,7 +60,12 @@ class Event(BaseModel):
     locked: bool = True  # personal events are locked by default
     description: Optional[str] = None  # e.g., "Discuss project timelines"
     creatorId: str = ""  # to store who created the event
-    
+    # isRecurring: bool = False
+    # recurrenceFrequency: Optional[str] = None  # e.g. "daily", "weekly", "monthly"
+    # recurrenceInterval: Optional[int] = 1  # how many days/weeks between occurrences
+    # recurrenceCount: Optional[int] = None  # total number of occurrences
+    # seriesId: Optional[str] = None  # ID linking all occurrences in a series
+
     class Config:
         json_encoders = {
             datetime: lambda v: v.replace(second=0, microsecond=0).isoformat()

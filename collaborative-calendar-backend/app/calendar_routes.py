@@ -1,26 +1,43 @@
+# calendar_routes.py
+
 import logging
 import json
 import requests
 from datetime import datetime
-from icalendar import Calendar as ICalCalendar, Event as ICalEvent
-from app.models import Event
-from typing import Tuple, List
-
-from azure.cosmos.exceptions import CosmosHttpResponseError
+from icalendar import Calendar as ICalCalendar
 from pydantic import ValidationError
-
+from azure.cosmos.exceptions import CosmosHttpResponseError
+from typing import Tuple, List
 from app.database import calendars_container, events_container, user_container
 from app.models import Event, Calendar, CalendarColor
 from app.notifications import send_notification_email
 
+# ------------------ Stream Chat imports -------------------
+import os
+from stream_chat import StreamChat
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# If you haven't already added a stream handler:
 if not logger.hasHandlers():
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+# Read environment variables for Stream
+STREAM_API_KEY = os.getenv("STREAM_API_KEY")
+STREAM_API_SECRET = os.getenv("STREAM_API_SECRET")
+
+# Initialize the Stream Chat client if credentials are present
+chat_client = None
+if STREAM_API_KEY and STREAM_API_SECRET:
+    chat_client = StreamChat(api_key=STREAM_API_KEY, api_secret=STREAM_API_SECRET)
+    logger.info("Stream Chat client initialized.")
+else:
+    logger.warning("STREAM_API_KEY or STREAM_API_SECRET not set. Chat features will be disabled.")
+
 
 
 def create_personal_calendar(user_id: str, name: str, color: str) -> Tuple[dict, int]:
@@ -676,12 +693,12 @@ def get_user_id(username: str):
 def create_group_calendar(owner_id: str, name: str, members_usernames: list, color: str):
     """
     Creates a new group calendar with specified members (by username) and color.
-    Sends an email notification to all members added to the new group calendar.
+    Also creates a new Stream Chat channel if chat_client is available.
     """
     logger.info("Creating group calendar '%s' for owner '%s' with color '%s' and members %s",
                 name, owner_id, color, members_usernames)
 
-    # Define allowed colors excluding 'blue' (modify as needed)
+    # Allowed colors (unchanged from your snippet)
     allowed_colors = [c.value for c in CalendarColor if c != CalendarColor.blue]
     if color not in allowed_colors:
         logger.warning("Invalid color '%s' for group calendar '%s'", color, name)
@@ -701,8 +718,9 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
         logger.exception("Error fetching owner '%s': %s", owner_id, str(e))
         return {"error": str(e)}, 500
 
-    # 2. Map member usernames to userIds
+    # 2. Convert member usernames -> userIds
     member_ids = []
+    from app.calendar_routes import get_user_id  # If needed or from user_routes
     for username in members_usernames:
         user_id = get_user_id(username)
         if not user_id:
@@ -710,13 +728,13 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
             return {"error": f"User '{username}' does not exist"}, 404
         member_ids.append(user_id)
 
-    # 3. Include owner in members if not already present
+    # 3. Include owner if not already
     if owner_id not in member_ids:
         member_ids.append(owner_id)
 
-    # 4. Enforce maximum of 5 members (adjust if needed)
+    # 4. Max 5 members
     if len(member_ids) > 5:
-        logger.warning("Attempted to create group calendar with %d members. Max allowed is 5.", len(member_ids))
+        logger.warning("Attempted to create group calendar with %d members. Max is 5.", len(member_ids))
         return {"error": "Cannot have more than 5 members in a group calendar"}, 400
 
     # 5. Create the Calendar model
@@ -728,30 +746,48 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
         color=color
     )
     cal_item = group_cal.dict()
-    cal_item["id"] = group_cal.calendarId  # For Cosmos 'id' field
+    cal_item["id"] = group_cal.calendarId
 
     # 6. Save to Cosmos
     try:
         calendars_container.create_item(cal_item)
-        logger.info("Group calendar '%s' created with ID '%s' and color '%s'",
+        logger.info("Group calendar '%s' created with ID '%s' color '%s'",
                     name, group_cal.calendarId, color)
 
-        # 7. Send email notifications to each member
-        for member_id in member_ids:
+        # 7. Email notifications (unchanged)
+        for mid in member_ids:
             user_query = list(user_container.query_items(
-                query="SELECT * FROM Users u WHERE u.userId = @userId",
-                parameters=[{"name": "@userId", "value": member_id}],
+                query="SELECT * FROM Users u WHERE u.userId = @uid",
+                parameters=[{"name": "@uid", "value": mid}],
                 enable_cross_partition_query=True
             ))
             if user_query:
                 user_doc = user_query[0]
-                subject = f"You've been added to a new group calendar!"
+                subject = "You've been added to a new group calendar!"
                 body_text = (
                     f"Hello {user_doc['username']},\n\n"
-                    f"\nYou have been added to the new group calendar '{name}'.\n"
+                    f"You have been added to the new group calendar '{name}'.\n"
                     f"Calendar ID: {group_cal.calendarId}\n\n"
                 )
                 send_notification_email(user_doc.get("email"), subject, body_text)
+
+        # 8. Create a new chat channel (if chat_client is configured)
+        if chat_client:
+            try:
+                channel = chat_client.channel(
+                    "team",  # channel type: 'team' or 'messaging'
+                    group_cal.calendarId,  # channel id
+                    {
+                        "name": name,
+                        "members": member_ids,      # The admin plus other members
+                        "created_by_id": owner_id,  # channel "owner"
+                    }
+                )
+                channel.create(user_id=owner_id)
+                logger.info("Stream Chat channel created for calendar '%s' with ID '%s'", name, group_cal.calendarId)
+            except Exception as e:
+                logger.exception("Error creating Stream Chat channel: %s", e)
+                # You might want to handle partial failure (calendar created but chat failed)
 
         return {
             "message": "Group calendar created successfully",
@@ -767,7 +803,7 @@ def create_group_calendar(owner_id: str, name: str, members_usernames: list, col
 def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     """
     Admin can add 'user_id' to the group calendar's members list.
-    Sends an email to the newly added user letting them know they've been added.
+    Also add the user to the Stream Chat channel if chat_client is available.
     """
     logger.info("Admin '%s' is adding user '%s' to group calendar '%s'",
                 admin_id, user_id, calendar_id)
@@ -786,42 +822,51 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
         logger.exception("Error fetching calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
 
-    # 2) Check if it's a group calendar
+    # 2) Must be group
     if not cal_doc.get("isGroup"):
         return {"error": "Cannot add user to a personal (non-group) calendar"}, 400
 
-    # 3) Check if the admin_id matches the calendar's ownerId
+    # 3) Admin check
     if cal_doc.get("ownerId") != admin_id:
         return {"error": "Only the calendar owner can add members"}, 403
 
-    # 4) Add user_id to members if not already there
+    # 4) Add user if not already
     if user_id in cal_doc["members"]:
         logger.info("User '%s' is already in the members list", user_id)
         return {"message": "User already in group calendar"}, 200
     else:
         cal_doc["members"].append(user_id)
 
-    # 5) Upsert the updated doc
+    # 5) Upsert doc
     try:
         calendars_container.upsert_item(cal_doc)
         logger.info("User '%s' added to group calendar '%s'", user_id, calendar_id)
 
-        # Fetch the newly added user's info
-        new_user_query = list(user_container.query_items(
+        # 5a) Send email
+        user_query = list(user_container.query_items(
             query="SELECT * FROM Users u WHERE u.userId = @userId",
             parameters=[{"name": "@userId", "value": user_id}],
             enable_cross_partition_query=True
         ))
-        if new_user_query:
-            new_user_doc = new_user_query[0]
+        if user_query:
+            new_user_doc = user_query[0]
             subject = "You've been added to a group calendar!"
             body_text = (
                 f"Hello {new_user_doc['username']},\n\n"
-                f"\nYou have been added to the group calendar '{cal_doc['name']}'.\n"
+                f"You have been added to the group calendar '{cal_doc['name']}'.\n"
                 f"Calendar ID: {cal_doc['calendarId']}\n"
                 f"Added by Admin ID: {admin_id}\n\n"
             )
             send_notification_email(new_user_doc.get("email"), subject, body_text)
+
+        # 5b) If chat_client and it's group => add them to the channel
+        if chat_client and cal_doc.get("isGroup"):
+            try:
+                channel = chat_client.channel("team", calendar_id)
+                channel.add_members([user_id])
+                logger.info("Added user '%s' to Stream Chat channel '%s'", user_id, calendar_id)
+            except Exception as e:
+                logger.exception("Error adding user '%s' to Stream Chat channel: %s", user_id, e)
 
         return {"message": "User added to group calendar successfully"}, 200
 
@@ -833,12 +878,12 @@ def add_user_to_group_calendar(calendar_id: str, admin_id: str, user_id: str):
 def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: str):
     """
     Admin can remove 'user_id' from the group calendar's members list.
-    Sends an email to that user letting them know they've been removed.
+    Also remove them from the Stream Chat channel if chat_client is available.
     """
     logger.info("Admin '%s' removing user '%s' from group calendar '%s'",
                 admin_id, user_id, calendar_id)
 
-    # 1) Fetch calendar doc
+    # 1) Fetch the calendar doc
     try:
         cal_query = list(calendars_container.query_items(
             query="SELECT * FROM Calendars c WHERE c.calendarId = @calId",
@@ -852,27 +897,24 @@ def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: st
         logger.exception("Error fetching calendar '%s': %s", calendar_id, str(e))
         return {"error": str(e)}, 500
 
-    # 2) Check if it's group
     if not cal_doc.get("isGroup"):
         return {"error": "Cannot remove user from a personal (non-group) calendar"}, 400
 
-    # 3) Check admin ownership
     if cal_doc.get("ownerId") != admin_id:
         return {"error": "Only the calendar owner can remove members"}, 403
 
-    # 4) Remove user_id if in members
     if user_id not in cal_doc["members"]:
         logger.info("User '%s' is not in this group calendar", user_id)
         return {"message": "User not in group calendar"}, 200
     else:
         cal_doc["members"].remove(user_id)
 
-    # 5) Upsert updated doc
+    # Upsert doc
     try:
         calendars_container.upsert_item(cal_doc)
         logger.info("User '%s' removed from group calendar '%s'", user_id, calendar_id)
 
-        # Send email to the removed user
+        # Email
         removed_user_query = list(user_container.query_items(
             query="SELECT * FROM Users u WHERE u.userId = @userId",
             parameters=[{"name": "@userId", "value": user_id}],
@@ -883,11 +925,20 @@ def remove_user_from_group_calendar(calendar_id: str, admin_id: str, user_id: st
             subject = "You've been removed from a group calendar"
             body_text = (
                 f"Hello {removed_user_doc['username']},\n\n"
-                f"\nYou have been removed from the group calendar '{cal_doc['name']}'.\n"
+                f"You have been removed from the group calendar '{cal_doc['name']}'.\n"
                 f"Calendar ID: {cal_doc['calendarId']}\n"
                 f"Removed by Admin ID: {admin_id}\n\n"
             )
             send_notification_email(removed_user_doc.get("email"), subject, body_text)
+
+        # Also remove them from the chat channel
+        if chat_client and cal_doc.get("isGroup"):
+            try:
+                channel = chat_client.channel("team", calendar_id)
+                channel.remove_members([user_id])
+                logger.info("Removed user '%s' from Stream Chat channel '%s'", user_id, calendar_id)
+            except Exception as e:
+                logger.exception("Error removing user '%s' from Chat channel: %s", user_id, e)
 
         return {"message": "User removed successfully"}, 200
 

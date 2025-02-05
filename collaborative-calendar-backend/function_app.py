@@ -1,6 +1,9 @@
 # function_app.py
 
 import azure.functions as func
+import logging
+import json
+
 from app.main import (
     register, login,
     create_event, list_events,
@@ -11,18 +14,12 @@ from app.main import (
     edit_group_calendar_handler, leave_group_calendar_handler,
     update_user_handler, delete_group_calendar_handler
 )
-
 from app.user_routes import google_oauth_login
 from app.utils import get_client_ip, get_geolocation
 from app.calendar_routes import import_internet_calendar
 from pydantic import ValidationError
-from app.user_routes import login_user, register_user
 from app.models import User
-
-
-import logging
-import json
-
+from app.user_routes import login_user, register_user
 
 
 logger = logging.getLogger(__name__)
@@ -39,16 +36,12 @@ app = func.FunctionApp()
 
 @app.route(route="register", methods=["POST"])
 def register_function(req: func.HttpRequest) -> func.HttpResponse:
-    from app.user_routes import register_user
     try:
         req_body = req.get_json()
         user = User(**req_body)
-        
-        # Extract client IP and geolocation
         client_ip = get_client_ip(req)
         location = get_geolocation(client_ip)
         
-        # Pass IP and location to register_user if needed
         response, status_code = register_user(user, client_ip, location)
         return func.HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except ValidationError as ve:
@@ -61,7 +54,6 @@ def register_function(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="login", methods=["POST"])
 def login_function(req: func.HttpRequest) -> func.HttpResponse:
-    from app.user_routes import login_user
     try:
         req_body = req.get_json()
         username = req_body.get("username")
@@ -74,11 +66,9 @@ def login_function(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json"
             )
         
-        # Extract client IP and geolocation
         client_ip = get_client_ip(req)
         location = get_geolocation(client_ip)
         
-        # Pass IP and location to login_user
         response, status_code = login_user(username, password, client_ip, location)
         return func.HttpResponse(json.dumps(response), status_code=status_code, mimetype="application/json")
     except ValidationError as ve:
@@ -87,6 +77,7 @@ def login_function(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logger.exception("Error in login endpoint: %s", str(e))
         return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500, mimetype="application/json")
+
 
 @app.route(route="user/{user_id}/profile", methods=["GET"])
 def get_user_profile(req: func.HttpRequest) -> func.HttpResponse:
@@ -111,25 +102,21 @@ def get_user_profile(req: func.HttpRequest) -> func.HttpResponse:
             )
 
         user_doc = user_query[0]
-        # Return just the fields you need:
         user_profile = {
             "username": user_doc.get("username", ""),
             "email": user_doc.get("email", "")
-            # Add more fields if you want
         }
         return func.HttpResponse(
             json.dumps(user_profile),
             status_code=200,
             mimetype="application/json"
         )
-
     except Exception as e:
         return func.HttpResponse(
             json.dumps({"error": str(e)}),
             status_code=500,
             mimetype="application/json"
         )
-
 
 @app.route(route="calendar/{calendar_id}/event", methods=["POST"])
 def create_event_function(req: func.HttpRequest) -> func.HttpResponse:
@@ -200,10 +187,6 @@ def delete_personal_calendar_function(req: func.HttpRequest) -> func.HttpRespons
 
 @app.route(route="user/{user_id}/calendars", methods=["GET"])
 def list_user_calendars(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    GET /user/{user_id}/calendars
-    Returns all calendars where the user is a member.
-    """
     from app.calendar_routes import get_user_calendars
     import json
     import logging
@@ -225,12 +208,10 @@ def list_user_calendars(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
-    
 
 @app.route(route="user/{user_id}", methods=["PUT"])
 def update_user_function(req: func.HttpRequest) -> func.HttpResponse:
     return update_user_handler(req)
-
 
 @app.route(route="forgot-password", methods=["POST"])
 def forgot_password_function(req: func.HttpRequest) -> func.HttpResponse:
@@ -241,11 +222,8 @@ def forgot_password_function(req: func.HttpRequest) -> func.HttpResponse:
 def reset_password_function(req: func.HttpRequest) -> func.HttpResponse:
     from app.user_routes import reset_password
     try:
-        # Extract client IP and geolocation
         client_ip = get_client_ip(req)
         location = get_geolocation(client_ip)
-        
-        # Pass IP and location to reset_password
         return reset_password(req, client_ip, location)
     except Exception as e:
         logger.exception("Error in reset_password_handler: %s", str(e))
@@ -255,32 +233,21 @@ def reset_password_function(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json"
         )
 
-
-
 @app.route(route="personal-calendar/{calendar_id}/edit", methods=["PUT"])
 def edit_personal_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
-    from app.calendar_routes import edit_personal_calendar  # Ensure correct import
-
+    from app.calendar_routes import edit_personal_calendar
     calendar_id = req.route_params.get("calendar_id")
     updated_data = req.get_json()
-    user_id = req.headers.get("user_id")  # Extract user_id from headers
-
+    user_id = req.headers.get("user_id")
     if not user_id:
         return func.HttpResponse(
             json.dumps({"error": "User ID is required"}),
             status_code=400,
             mimetype="application/json"
         )
-
-    # Call the handler and unpack the tuple
     response_body, status_code = edit_personal_calendar(calendar_id, user_id, updated_data)
-
-    # Convert the dictionary to a JSON string
-    response_json = json.dumps(response_body)
-
-    # Return an HttpResponse object
     return func.HttpResponse(
-        body=response_json,
+        body=json.dumps(response_body),
         status_code=status_code,
         mimetype="application/json"
     )
@@ -292,34 +259,25 @@ def delete_group_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="calendar/import", methods=["POST"])
 def import_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Handler to import an internet calendar.
-    Expects JSON body with 'userId', 'iCalURL', 'name' (optional), and 'color' (optional).
-    """
     try:
         body = req.get_json()
         user_id = body.get("userId")
         ical_url = body.get("iCalURL")
-        name = body.get("name", '')  # Optional
-        color = body.get("color", 'blue')  # Optional with default
-
-        # Validate required fields
+        name = body.get("name", '')
+        color = body.get("color", 'blue')
         if not user_id or not ical_url:
             return func.HttpResponse(
                 json.dumps({"error": "Missing userId or iCalURL in request body."}),
                 status_code=400,
                 mimetype="application/json"
             )
-
-        # Call the import_internet_calendar function with all necessary parameters
+        from app.calendar_routes import import_internet_calendar
         response_body, status_code = import_internet_calendar(user_id, ical_url, name, color)
-
         return func.HttpResponse(
             json.dumps(response_body),
             status_code=status_code,
             mimetype="application/json"
         )
-
     except Exception as e:
         logger.exception("Error in import_calendar_function: %s", str(e))
         return func.HttpResponse(
@@ -327,13 +285,9 @@ def import_calendar_function(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
-    
+
 @app.route(route="auth/google", methods=["POST"])
 def google_auth_function(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Expects JSON body with 'idToken' (the token from Google).
-    Verifies the token, then logs in or registers the user.
-    """
     import json
     import logging
     
@@ -342,7 +296,6 @@ def google_auth_function(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
         id_token_str = body.get("idToken")
-
         if not id_token_str:
             return func.HttpResponse(
                 json.dumps({"error": "Missing idToken in request body."}),
@@ -350,11 +303,8 @@ def google_auth_function(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json"
             )
         
-        # Optionally capture client IP & location
         client_ip = get_client_ip(req)
         location = get_geolocation(client_ip)
-
-        # Call your user_routes logic to verify token and handle upsert
         response, status_code = google_oauth_login(id_token_str, client_ip, location)
         
         return func.HttpResponse(
@@ -362,7 +312,6 @@ def google_auth_function(req: func.HttpRequest) -> func.HttpResponse:
             status_code=status_code,
             mimetype="application/json"
         )
-
     except Exception as e:
         logger.exception("Error in google_auth_function: %s", str(e))
         return func.HttpResponse(
